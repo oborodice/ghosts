@@ -24,4 +24,8 @@ $ uv run scripts/extract_stroke_features.py
 
 # フェーズ1のVAEを学習し、data/checkpoints/vae_phase1.ptへ保存する
 $ uv run scripts/train_vae.py
+
+# 学習済みモデル(vae_phase1.pt)の品質を数値で確認する
+# (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布)
+$ uv run scripts/evaluate_vae.py
 ```
