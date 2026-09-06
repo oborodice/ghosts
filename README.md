@@ -7,3 +7,4 @@
 ## ドキュメント
 
 - [学習側](training/README.md)
+- [フロントエンド](web/README.md)
