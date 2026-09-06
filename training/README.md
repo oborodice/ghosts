@@ -38,4 +38,7 @@ $ uv run scripts/visualize_reconstruction.py
 
 # 事前分布N(0,I)からサンプリングしたzのdecode結果を目視確認する
 $ uv run scripts/visualize_prior_samples.py
+
+# validationの2サンプル間を潜在空間上で線形補間し、字形が滑らかに変化するか目視確認する
+$ uv run scripts/visualize_latent_interpolation.py
 ```
