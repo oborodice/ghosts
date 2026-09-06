@@ -17,4 +17,8 @@ $ uv run scripts/view_kanji.py
 
 # 各漢字の画数を集計し、分布(最小/最大/平均/パーセンタイル)を表示する
 $ uv run scripts/stroke_count_stats.py
+
+# 各漢字のストロークを固定長テンソルに変換し、data/stroke_features.npzへ保存する
+# (画数がスロット数(22)を超える漢字は除外する)
+$ uv run scripts/extract_stroke_features.py
 ```
