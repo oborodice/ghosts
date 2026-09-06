@@ -22,6 +22,7 @@ from vae_model import (
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "stroke_features.npz"
 
 BETA = 1.0
+KL_ANNEALING_EPOCHS = 30  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
 VAL_SPLIT = 0.1
@@ -156,6 +157,12 @@ def _save_checkpoint(model: VAE, shape: ModelShape, mean: np.ndarray, std: np.nd
     )
 
 
+def _compute_beta(epoch: int) -> float:
+    # 学習序盤にKL項がフルに効くと一部の潜在次元が使われなくなる(posterior collapse)ため、
+    # KL_ANNEALING_EPOCHSかけてβを0からBETAまで線形に引き上げる
+    return BETA * min(1.0, epoch / KL_ANNEALING_EPOCHS)
+
+
 def main() -> None:
     torch.manual_seed(SEED)
     device = select_device()
@@ -177,9 +184,11 @@ def main() -> None:
     epochs_without_improvement = 0
 
     for epoch in range(1, MAX_EPOCHS + 1):
-        train_loss = _run_epoch(train_loader, model, datasets.shape, device, optimizer, BETA)
+        beta = _compute_beta(epoch)
+        train_loss = _run_epoch(train_loader, model, datasets.shape, device, optimizer, beta)
+        # 早期終了・チェックポイント選定はannealing中でも比較可能にするため、常に最終的なβ(=BETA)で評価する
         val_loss = _run_epoch(val_loader, model, datasets.shape, device, None, BETA)
-        print(f"Epoch {epoch}: train_loss={train_loss:.4f} val_loss={val_loss:.4f}")
+        print(f"Epoch {epoch}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} beta={beta:.4f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
