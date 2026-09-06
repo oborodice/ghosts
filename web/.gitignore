@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# 学習側で生成するモデル成果物(training/scripts/export_onnx.pyが出力する)
+*.onnx
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

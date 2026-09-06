@@ -41,4 +41,8 @@ $ uv run scripts/visualize_prior_samples.py
 
 # validationの2サンプル間を潜在空間上で線形補間し、字形が滑らかに変化するか目視確認する
 $ uv run scripts/visualize_latent_interpolation.py
+
+# 学習済みモデル(vae_phase1.pt)をONNX形式でエクスポートし、web/public/vae_phase1.onnxへ保存する
+# (web側で読み込めるよう、decode・標準化の逆変換・existenceのSigmoidまでを1つのグラフに含める)
+$ uv run scripts/export_onnx.py
 ```
