@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import matplotlib.pyplot as plt
 
+from vae_checkpoint import load_checkpoint
 from vae_eval_common import (
     decode_to_segments,
     draw_segments,
     encode,
-    load_checkpoint,
     load_validation_data,
     strokes_to_segments,
 )

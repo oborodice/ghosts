@@ -2,7 +2,8 @@
 import matplotlib.pyplot as plt
 import torch
 
-from vae_eval_common import decode_to_segments, draw_segments, load_checkpoint
+from vae_checkpoint import load_checkpoint
+from vae_eval_common import decode_to_segments, draw_segments
 from vae_model import select_device
 
 SAMPLE_COUNT = 6

@@ -6,33 +6,11 @@ import numpy as np
 import torch
 
 from train_vae import load_stroke_features, split_train_val_indices, standardize
-from vae_model import CHECKPOINT_PATH, VAE, ModelShape, flatten_input, unflatten_output
+from vae_checkpoint import Checkpoint
+from vae_model import flatten_input, unflatten_output
 
 # existenceの確率(Sigmoid(existence_logits))をbool判定に変換する閾値。evaluate_vae.pyの正答率算出とも共有する
 EXISTENCE_THRESHOLD = 0.5
-
-
-class Checkpoint(NamedTuple):
-    model: VAE
-    shape: ModelShape
-    mean: torch.Tensor
-    std: torch.Tensor
-    latent_dim: int
-
-
-def load_checkpoint(device: torch.device) -> Checkpoint:
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-    shape = ModelShape(checkpoint["slot_count"], checkpoint["feature_dim"])
-    model = VAE(shape, checkpoint["hidden_dims"], checkpoint["latent_dim"]).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    return Checkpoint(
-        model,
-        shape,
-        checkpoint["mean"].to(device),
-        checkpoint["std"].to(device),
-        checkpoint["latent_dim"],
-    )
 
 
 class ValidationData(NamedTuple):

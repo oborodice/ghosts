@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 
 from train_vae import stroke_endpoints
-from vae_eval_common import existence_mask_from_logits, load_checkpoint, load_validation_data
+from vae_checkpoint import load_checkpoint
+from vae_eval_common import existence_mask_from_logits, load_validation_data
 from vae_model import VAE, flatten_input, select_device, unflatten_output
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
