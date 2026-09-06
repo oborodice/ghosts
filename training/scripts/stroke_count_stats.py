@@ -9,13 +9,13 @@ SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
 PERCENTILES = (90, 95, 97, 99)
 
 
-def count_strokes(svg_path: Path) -> int:
+def _count_strokes(svg_path: Path) -> int:
     root = ET.parse(svg_path).getroot()
     return len(root.findall(f".//{SVG_NAMESPACE}path"))
 
 
 def main() -> None:
-    stroke_counts = np.array([count_strokes(path) for path in DATA_DIR.glob("*.svg")])
+    stroke_counts = np.array([_count_strokes(path) for path in DATA_DIR.glob("*.svg")])
 
     print(f"Kanji count: {len(stroke_counts)}")
     print(f"Min strokes: {stroke_counts.min()}")

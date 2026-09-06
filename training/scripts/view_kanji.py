@@ -12,7 +12,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "kanjivg"
 SAMPLES_PER_STROKE = 100
 
 
-def draw_kanji(ax: plt.Axes, char: str) -> None:
+def _draw_kanji(ax: plt.Axes, char: str) -> None:
     svg_path = DATA_DIR / f"{ord(char):05x}.svg"
     strokes, _ = svg2paths(str(svg_path))
     for stroke in strokes:
@@ -28,7 +28,7 @@ def draw_kanji(ax: plt.Axes, char: str) -> None:
 def main() -> None:
     _, axes = plt.subplots(nrows=1, ncols=len(KANJI))
     for ax, char in zip(axes, KANJI):
-        draw_kanji(ax, char)
+        _draw_kanji(ax, char)
     plt.show()
 
 

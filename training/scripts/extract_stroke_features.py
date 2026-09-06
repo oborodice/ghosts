@@ -29,11 +29,11 @@ FEATURE_DIM = len(StrokeFeatures._fields)
 STROKE_NUMBER_PATTERN = re.compile(r"-s(\d+)$")
 
 
-def parse_stroke_number(path_element: ET.Element) -> int:
+def _parse_stroke_number(path_element: ET.Element) -> int:
     return int(STROKE_NUMBER_PATTERN.search(path_element.get("id")).group(1))
 
 
-def compute_stroke_features(path_data: str) -> StrokeFeatures:
+def _compute_stroke_features(path_data: str) -> StrokeFeatures:
     path = parse_path(path_data)
     start, end = path.start, path.end
     length = path.length()
@@ -43,16 +43,16 @@ def compute_stroke_features(path_data: str) -> StrokeFeatures:
     return StrokeFeatures(start.real, start.imag, angle, curvature, length)
 
 
-def extract_kanji_tensors(svg_path: Path) -> KanjiTensors | None:
+def _extract_kanji_tensors(svg_path: Path) -> KanjiTensors | None:
     root = ET.parse(svg_path).getroot()
-    path_elements = sorted(root.findall(f".//{SVG_NAMESPACE}path"), key=parse_stroke_number)
+    path_elements = sorted(root.findall(f".//{SVG_NAMESPACE}path"), key=_parse_stroke_number)
     if len(path_elements) > SLOT_COUNT:
         return None
 
     strokes = np.zeros((SLOT_COUNT, FEATURE_DIM))
     existence = np.zeros(SLOT_COUNT)
     for slot, path_element in enumerate(path_elements):
-        strokes[slot] = compute_stroke_features(path_element.get("d"))
+        strokes[slot] = _compute_stroke_features(path_element.get("d"))
         existence[slot] = 1.0
     return KanjiTensors(strokes, existence)
 
@@ -63,7 +63,7 @@ def main() -> None:
     excluded_count = 0
 
     for svg_path in DATA_DIR.glob("*.svg"):
-        kanji_tensors = extract_kanji_tensors(svg_path)
+        kanji_tensors = _extract_kanji_tensors(svg_path)
         if kanji_tensors is None:
             excluded_count += 1
             continue
