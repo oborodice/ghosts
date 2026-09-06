@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from typing import NamedTuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -74,6 +75,14 @@ def strokes_to_segments(
         end = start + (length - curvature) * complex(np.cos(angle), np.sin(angle))
         segments.append((start, end))
     return segments
+
+
+def draw_segments(ax: plt.Axes, segments: list[tuple[complex, complex]]) -> None:
+    for start, end in segments:
+        # SVGはy軸が下向きのため、view_kanji.pyと同様上向きに合わせて反転する
+        ax.plot([start.real, end.real], [-start.imag, -end.imag], color="black")
+    ax.set_aspect("equal")
+    ax.axis("off")
 
 
 def _destandardize(strokes_standardized: torch.Tensor, checkpoint: Checkpoint) -> torch.Tensor:
