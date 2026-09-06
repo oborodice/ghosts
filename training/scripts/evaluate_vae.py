@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from train_vae import stroke_endpoints
 from vae_eval_common import existence_mask_from_logits, load_checkpoint, load_validation_data
 from vae_model import VAE, flatten_input, select_device, unflatten_output
 
@@ -24,7 +25,9 @@ def _kl_per_dim(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
     return (-0.5 * (1 + logvar - mu.pow(2) - logvar.exp())).mean(dim=0)
 
 
-def _print_loss_breakdown(result: ForwardResult, kl_per_dim: torch.Tensor) -> None:
+def _print_loss_breakdown(
+    result: ForwardResult, kl_per_dim: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> None:
     print("== 1. Loss breakdown ==")
     # train_vae._compute_lossと同じ集約方法(sum→batch mean)で個別に集計する
     strokes, existence, strokes_recon, existence_logits = result
@@ -37,9 +40,14 @@ def _print_loss_breakdown(result: ForwardResult, kl_per_dim: torch.Tensor) -> No
     )
     kl_divergence = kl_per_dim.sum()
 
+    end_true = stroke_endpoints(strokes, mean, std)
+    end_recon = stroke_endpoints(strokes_recon, mean, std)
+    endpoint_loss = (((end_recon - end_true) ** 2) * mask).sum(dim=(1, 2)).mean()
+
     print(f"strokes_loss:   {strokes_loss.item():.4f}")
     print(f"existence_loss: {existence_loss.item():.4f}")
     print(f"kl_divergence:  {kl_divergence.item():.4f}")
+    print(f"endpoint_loss:  {endpoint_loss.item():.4f}")
     print()
 
 
@@ -118,7 +126,7 @@ def main() -> None:
         )
 
     kl_per_dim = _kl_per_dim(mu, logvar)
-    _print_loss_breakdown(result, kl_per_dim)
+    _print_loss_breakdown(result, kl_per_dim, checkpoint.mean, checkpoint.std)
     _print_active_units(kl_per_dim)
     _print_weight_health(checkpoint.model)
     _print_error_distribution(result_deterministic)

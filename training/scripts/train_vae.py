@@ -23,6 +23,7 @@ DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "stroke_features.n
 
 BETA = 1.0
 KL_ANNEALING_EPOCHS = 30  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)
+ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_lossと同程度のスケールになるよう設計してある)
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
 VAL_SPLIT = 0.1
@@ -87,6 +88,20 @@ def _prepare_datasets() -> Datasets:
     return Datasets(train_dataset, val_dataset, shape, mean, std)
 
 
+def stroke_endpoints(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    # cos/sinは実際のラジアン値でないと意味を持たないため、角度・長さ・曲率は一旦実スケールへ戻す
+    strokes_destd = strokes * std + mean
+    start = strokes_destd[..., 0:2]
+    angle = strokes_destd[..., 2]
+    curvature = strokes_destd[..., 3]
+    length = strokes_destd[..., 4]
+    radius = length - curvature
+    direction = torch.stack([torch.cos(angle), torch.sin(angle)], dim=-1)
+    end = start + radius.unsqueeze(-1) * direction
+    # start_x, start_yと同じ統計量(mean/stdの先頭2要素)で標準化し、strokes_lossと比較可能なスケールに揃える
+    return (end - mean[0:2]) / std[0:2]
+
+
 def _compute_loss(
     strokes: torch.Tensor,
     existence: torch.Tensor,
@@ -95,6 +110,8 @@ def _compute_loss(
     mu: torch.Tensor,
     logvar: torch.Tensor,
     beta: float,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> torch.Tensor:
     mask = existence.unsqueeze(-1)  # (B, slot_count, 1) -> strokesの特徴量方向へブロードキャスト
     # 特徴量・スロット方向は和、バッチ方向は平均を取る(sum→batch mean)。
@@ -106,7 +123,14 @@ def _compute_loss(
         .mean()
     )
     kl_divergence = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
-    return strokes_loss + existence_loss + beta * kl_divergence
+
+    # angle/lengthの誤差は終点位置(特にストロークが長いほど)で増幅されるため、
+    # 生パラメータのMSEとは別に終点座標自体のMSEも損失に加える
+    end_true = stroke_endpoints(strokes, mean, std)
+    end_recon = stroke_endpoints(strokes_recon, mean, std)
+    endpoint_loss = (((end_recon - end_true) ** 2) * mask).sum(dim=(1, 2)).mean()
+
+    return strokes_loss + existence_loss + beta * kl_divergence + ENDPOINT_LOSS_WEIGHT * endpoint_loss
 
 
 def _run_epoch(
@@ -116,6 +140,8 @@ def _run_epoch(
     device: torch.device,
     optimizer: optim.Optimizer | None,
     beta: float,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> float:
     # optimizerがNoneのとき(validation時)は重み更新を行わないeval modeとして扱う
     is_training = optimizer is not None
@@ -128,7 +154,15 @@ def _run_epoch(
             recon, mu, logvar = model(flatten_input(strokes_batch, existence_batch))
             strokes_recon, existence_logits = unflatten_output(recon, shape)
             loss = _compute_loss(
-                strokes_batch, existence_batch, strokes_recon, existence_logits, mu, logvar, beta
+                strokes_batch,
+                existence_batch,
+                strokes_recon,
+                existence_logits,
+                mu,
+                logvar,
+                beta,
+                mean,
+                std,
             )
 
             if optimizer is not None:
@@ -179,15 +213,21 @@ def main() -> None:
 
     model = VAE(datasets.shape, HIDDEN_DIMS, LATENT_DIM).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    mean_tensor = torch.tensor(datasets.mean, dtype=torch.float32, device=device)
+    std_tensor = torch.tensor(datasets.std, dtype=torch.float32, device=device)
 
     best_val_loss = float("inf")
     epochs_without_improvement = 0
 
     for epoch in range(1, MAX_EPOCHS + 1):
         beta = _compute_beta(epoch)
-        train_loss = _run_epoch(train_loader, model, datasets.shape, device, optimizer, beta)
+        train_loss = _run_epoch(
+            train_loader, model, datasets.shape, device, optimizer, beta, mean_tensor, std_tensor
+        )
         # 早期終了・チェックポイント選定はannealing中でも比較可能にするため、常に最終的なβ(=BETA)で評価する
-        val_loss = _run_epoch(val_loader, model, datasets.shape, device, None, BETA)
+        val_loss = _run_epoch(
+            val_loader, model, datasets.shape, device, None, BETA, mean_tensor, std_tensor
+        )
         print(f"Epoch {epoch}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} beta={beta:.4f}")
 
         if val_loss < best_val_loss:
