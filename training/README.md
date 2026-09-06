@@ -14,4 +14,7 @@ $ ./scripts/download_kanjivg.sh
 
 # ダウンロードしたSVGのストロークデータを、いくつかの漢字を選んで可視化する
 $ uv run scripts/view_kanji.py
+
+# 各漢字の画数を集計し、分布(最小/最大/平均/パーセンタイル)を表示する
+$ uv run scripts/stroke_count_stats.py
 ```
