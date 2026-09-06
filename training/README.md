@@ -5,5 +5,10 @@
 ## セットアップ
 
 ```sh
+# 依存パッケージのインストール
 $ uv sync
+
+# KanjiVG (https://kanjivg.tagaini.net/, CC BY-SA 3.0) データセットの取得
+# data/kanjivg/配下にSVGファイルが展開される(取得済みの場合は再ダウンロードをスキップする)
+$ ./scripts/download_kanjivg.sh
 ```
