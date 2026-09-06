@@ -11,7 +11,11 @@ $ uv sync
 # KanjiVG (https://kanjivg.tagaini.net/, CC BY-SA 3.0) データセットの取得
 # data/kanjivg/配下にSVGファイルが展開される(取得済みの場合は再ダウンロードをスキップする)
 $ ./scripts/download_kanjivg.sh
+```
 
+## 実行手順
+
+```sh
 # ダウンロードしたSVGのストロークデータを、いくつかの漢字を選んで可視化する
 $ uv run scripts/view_kanji.py
 
