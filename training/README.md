@@ -21,4 +21,7 @@ $ uv run scripts/stroke_count_stats.py
 # 各漢字のストロークを固定長テンソルに変換し、data/stroke_features.npzへ保存する
 # (画数がスロット数(22)を超える漢字は除外する)
 $ uv run scripts/extract_stroke_features.py
+
+# フェーズ1のVAEを学習し、data/checkpoints/vae_phase1.ptへ保存する
+$ uv run scripts/train_vae.py
 ```
