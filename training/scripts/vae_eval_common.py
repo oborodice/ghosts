@@ -17,6 +17,7 @@ class Checkpoint(NamedTuple):
     shape: ModelShape
     mean: torch.Tensor
     std: torch.Tensor
+    latent_dim: int
 
 
 def load_checkpoint(device: torch.device) -> Checkpoint:
@@ -25,7 +26,13 @@ def load_checkpoint(device: torch.device) -> Checkpoint:
     model = VAE(shape, checkpoint["hidden_dims"], checkpoint["latent_dim"]).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
-    return Checkpoint(model, shape, checkpoint["mean"].to(device), checkpoint["std"].to(device))
+    return Checkpoint(
+        model,
+        shape,
+        checkpoint["mean"].to(device),
+        checkpoint["std"].to(device),
+        checkpoint["latent_dim"],
+    )
 
 
 class ValidationData(NamedTuple):

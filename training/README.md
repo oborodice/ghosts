@@ -31,4 +31,7 @@ $ uv run scripts/evaluate_vae.py
 
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する
 $ uv run scripts/visualize_reconstruction.py
+
+# 事前分布N(0,I)からサンプリングしたzのdecode結果を目視確認する
+$ uv run scripts/visualize_prior_samples.py
 ```
