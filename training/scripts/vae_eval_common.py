@@ -12,6 +12,10 @@ from vae_model import flatten_input, unflatten_output
 # existenceの確率(Sigmoid(existence_logits))をbool判定に変換する閾値。evaluate_vae.pyの正答率算出とも共有する
 EXISTENCE_THRESHOLD = 0.5
 
+# 生成時にzを実データへ引き寄せるカーネル幅。web/src/latentPrior.tsのKERNEL_BANDWIDTHと同じ値を保つ
+# (幽霊文字の生成モデル(モデル設計・フェーズ2).md の「生成品質(潜在空間の構造)の検証」参照)
+KERNEL_BANDWIDTH = 0.6
+
 
 class SplitData(NamedTuple):
     strokes: np.ndarray  # 標準化前(可視化・誤差計算の元データ用)
@@ -53,6 +57,14 @@ def encode(
     checkpoint: Checkpoint, strokes: torch.Tensor, existence: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return checkpoint.model.encode(flatten_input(strokes, existence))
+
+
+@torch.no_grad()
+def attract_to_latent_prior(z_raw: torch.Tensor, mu_real: torch.Tensor) -> torch.Tensor:
+    # web/src/latentPrior.tsのattractToLatentPriorと同じ計算(Nadaraya-Watson推定量)
+    dist_sq = torch.cdist(z_raw, mu_real) ** 2
+    weights = torch.softmax(-dist_sq / (2 * KERNEL_BANDWIDTH * KERNEL_BANDWIDTH), dim=1)
+    return weights @ mu_real
 
 
 def existence_mask_from_logits(existence_logits: torch.Tensor) -> np.ndarray:
