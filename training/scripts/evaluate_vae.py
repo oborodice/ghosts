@@ -7,8 +7,8 @@ import torch.nn.functional as F
 
 from train_vae import stroke_endpoints
 from vae_checkpoint import load_checkpoint
-from vae_eval_common import existence_mask_from_logits, load_validation_data
-from vae_model import VAE, flatten_input, select_device, unflatten_output
+from vae_eval_common import existence_mask_from_logits, load_train_data, load_validation_data
+from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_output
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
 WORST_SAMPLE_COUNT = 5
@@ -75,16 +75,30 @@ def _print_weight_health(model: VAE) -> None:
     print()
 
 
-def _print_error_distribution(result: ForwardResult) -> None:
-    print("== 4. Validation-wide error distribution ==")
-    strokes, existence, strokes_recon, existence_logits = result
+def _decode_deterministic(
+    model: VAE, mu: torch.Tensor, shape: ModelShape, strokes_standardized: torch.Tensor, existence_tensor: torch.Tensor
+) -> ForwardResult:
+    # 誤差分布・丸暗記化チェックで共通して使う決定論的デコード(ノイズのないmuから)
+    recon = model.decode(mu)
+    strokes_recon, existence_logits = unflatten_output(recon, shape)
+    return ForwardResult(strokes_standardized, existence_tensor, strokes_recon, existence_logits)
+
+
+def _strokes_mse(result: ForwardResult) -> np.ndarray:
+    strokes, existence, strokes_recon, _ = result
     feature_dim = strokes.shape[-1]
     mask = existence.unsqueeze(-1)
     # 実在するスロット・特徴量あたりの平均二乗誤差(画数による誤差の見かけ上の増減を避けるため、和ではなく平均を取る)
     sample_mse = ((strokes_recon - strokes) ** 2 * mask).sum(dim=(1, 2)) / (
         mask.sum(dim=(1, 2)) * feature_dim
     )
-    sample_mse = sample_mse.cpu().numpy()
+    return sample_mse.cpu().numpy()
+
+
+def _print_error_distribution(result: ForwardResult) -> None:
+    print("== 4. Validation-wide error distribution ==")
+    _, existence, _, existence_logits = result
+    sample_mse = _strokes_mse(result)
 
     existence_pred = existence_mask_from_logits(existence_logits)
     existence_true = existence.cpu().numpy().astype(bool)
@@ -100,12 +114,45 @@ def _print_error_distribution(result: ForwardResult) -> None:
             f"  index={index}: mse={sample_mse[index]:.4f} "
             f"existence_accuracy={sample_accuracy[index]:.4f}"
         )
+    print()
+
+
+def _avg_exp_logvar(logvar: torch.Tensor, alive_mask: torch.Tensor) -> float:
+    # 生きている次元について、reparameterizeで乗せるノイズexp(logvar)の平均。
+    # 1に近いほど事前分布相当のノイズを保っており、0に近いほどノイズなしの決定論的な符号化(丸暗記寄り)であることを示す
+    return logvar.exp().mean(dim=0)[alive_mask].mean().item() if alive_mask.any() else float("nan")
+
+
+def _print_memorization_check(
+    val_result: ForwardResult,
+    train_result: ForwardResult,
+    val_logvar: torch.Tensor,
+    train_logvar: torch.Tensor,
+    kl_per_dim: torch.Tensor,
+) -> None:
+    # 生成(z〜N(0,1)からのdecode)は学習で一度も使っていないzから始まるため、
+    # encoderが各学習データにノイズなしの点を割り当てて丸暗記していないか(過学習していないか)を確認する
+    print("== 5. Memorization check ==")
+    val_mse = _strokes_mse(val_result).mean()
+    train_mse = _strokes_mse(train_result).mean()
+
+    alive_mask = kl_per_dim >= ACTIVE_UNIT_THRESHOLD
+    val_avg_exp_logvar = _avg_exp_logvar(val_logvar, alive_mask)
+    # 丸暗記化はまさに学習で見た点(train)で起きるため、trainのexp(logvar)も別途確認する
+    train_avg_exp_logvar = _avg_exp_logvar(train_logvar, alive_mask)
+
+    print(f"train strokes MSE: {train_mse:.4f}")
+    print(f"val strokes MSE:   {val_mse:.4f}")
+    print(f"train/val gap:     {val_mse - train_mse:.4f} (larger suggests overfitting/memorization)")
+    print(f"avg exp(logvar) (active dims): train={train_avg_exp_logvar:.4f} val={val_avg_exp_logvar:.4f}")
+    print()
 
 
 def main() -> None:
     device = select_device()
     checkpoint = load_checkpoint(device)
     data = load_validation_data(checkpoint, device)
+    train_data = load_train_data(checkpoint, device)
 
     with torch.no_grad():
         # 損失の内訳・KLはtrain_vaeのvalidation lossと同じ経路(サンプリングzを含むforward)で再現する
@@ -118,12 +165,16 @@ def main() -> None:
         )
 
         # 誤差分布はワースト字形を実行のたびに入れ替えたくないため、ノイズのないmuから決定論的にデコードする
-        recon_deterministic = checkpoint.model.decode(mu)
-        strokes_recon_det, existence_logits_det = unflatten_output(
-            recon_deterministic, checkpoint.shape
+        result_deterministic = _decode_deterministic(
+            checkpoint.model, mu, checkpoint.shape, data.strokes_standardized, data.existence_tensor
         )
-        result_deterministic = ForwardResult(
-            data.strokes_standardized, data.existence_tensor, strokes_recon_det, existence_logits_det
+
+        # 丸暗記化チェック用にtrain側も同じ経路で再構成する
+        train_mu, train_logvar = checkpoint.model.encode(
+            flatten_input(train_data.strokes_standardized, train_data.existence_tensor)
+        )
+        train_result = _decode_deterministic(
+            checkpoint.model, train_mu, checkpoint.shape, train_data.strokes_standardized, train_data.existence_tensor
         )
 
     kl_per_dim = _kl_per_dim(mu, logvar)
@@ -131,6 +182,7 @@ def main() -> None:
     _print_active_units(kl_per_dim)
     _print_weight_health(checkpoint.model)
     _print_error_distribution(result_deterministic)
+    _print_memorization_check(result_deterministic, train_result, logvar, train_logvar, kl_per_dim)
 
 
 if __name__ == "__main__":

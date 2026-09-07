@@ -30,7 +30,7 @@ $ uv run scripts/extract_stroke_features.py
 $ uv run scripts/train_vae.py
 
 # 学習済みモデル(vae_phase1.pt)の品質を数値で確認する
-# (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布)
+# (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布、丸暗記化していないかの確認)
 $ uv run scripts/evaluate_vae.py
 
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する

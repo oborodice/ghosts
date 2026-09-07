@@ -13,27 +13,39 @@ from vae_model import flatten_input, unflatten_output
 EXISTENCE_THRESHOLD = 0.5
 
 
-class ValidationData(NamedTuple):
-    strokes: np.ndarray  # 標準化前(可視化の元データ用)
+class SplitData(NamedTuple):
+    strokes: np.ndarray  # 標準化前(可視化・誤差計算の元データ用)
     existence: np.ndarray
     strokes_standardized: torch.Tensor  # モデル入力用
     existence_tensor: torch.Tensor
 
 
-def load_validation_data(checkpoint: Checkpoint, device: torch.device) -> ValidationData:
+def _build_split_data(
+    indices: np.ndarray, strokes: np.ndarray, existence: np.ndarray, checkpoint: Checkpoint, device: torch.device
+) -> SplitData:
+    split_strokes, split_existence = strokes[indices], existence[indices]
+    mean, std = checkpoint.mean.cpu().numpy(), checkpoint.std.cpu().numpy()
+    split_strokes_standardized = standardize(split_strokes, mean, std)
+    return SplitData(
+        split_strokes,
+        split_existence,
+        torch.tensor(split_strokes_standardized, dtype=torch.float32, device=device),
+        torch.tensor(split_existence, dtype=torch.float32, device=device),
+    )
+
+
+def load_validation_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
     strokes, existence = load_stroke_features()
     # train_vae.pyと同じSEEDでスプリットを再現し、学習に使っていないデータのみを対象にする
     _, val_indices = split_train_val_indices(len(strokes))
-    val_strokes, val_existence = strokes[val_indices], existence[val_indices]
+    return _build_split_data(val_indices, strokes, existence, checkpoint, device)
 
-    mean, std = checkpoint.mean.cpu().numpy(), checkpoint.std.cpu().numpy()
-    val_strokes_standardized = standardize(val_strokes, mean, std)
-    return ValidationData(
-        val_strokes,
-        val_existence,
-        torch.tensor(val_strokes_standardized, dtype=torch.float32, device=device),
-        torch.tensor(val_existence, dtype=torch.float32, device=device),
-    )
+
+def load_train_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
+    strokes, existence = load_stroke_features()
+    # train_vae.pyと同じSEEDでスプリットを再現し、学習に使ったデータのみを対象にする(丸暗記化の確認用)
+    train_indices, _ = split_train_val_indices(len(strokes))
+    return _build_split_data(train_indices, strokes, existence, checkpoint, device)
 
 
 @torch.no_grad()
