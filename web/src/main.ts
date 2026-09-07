@@ -1,5 +1,4 @@
 import "./style.css";
-import { attractToLatentPrior, loadLatentPrior } from "./latentPrior";
 import { latentAt } from "./latentWalk";
 import { generate, loadModel } from "./model";
 import { drawStrokes } from "./render";
@@ -10,13 +9,12 @@ function getCanvasContext(): CanvasRenderingContext2D {
 }
 
 async function main(): Promise<void> {
-  const [session, latentPrior] = await Promise.all([loadModel(), loadLatentPrior()]);
+  const session = await loadModel();
   const ctx = getCanvasContext();
 
   // 前フレームの推論が終わるまで次のrequestAnimationFrameを呼ばないため、フレームが重なって溜まることはない
   async function renderFrame(timeMs: number): Promise<void> {
-    const z = attractToLatentPrior(latentAt(timeMs / 1000), latentPrior);
-    const result = await generate(session, z);
+    const result = await generate(session, latentAt(timeMs / 1000));
     drawStrokes(ctx, result);
     requestAnimationFrame(renderFrame);
   }

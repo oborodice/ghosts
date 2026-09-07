@@ -8,6 +8,7 @@ import torch.nn as nn
 from torch.export import Dim
 
 from vae_checkpoint import load_checkpoint
+from vae_eval_common import attract_to_latent_prior, encode, load_train_data
 from vae_model import VAE, ModelShape, unflatten_output
 
 # webがfetchして読み込む配置場所(training/dataではなくweb/publicに置く)
@@ -18,17 +19,21 @@ VERIFICATION_BATCH_SIZE = 4  # エクスポート時のダミー入力(バッチ
 
 
 class _GenerationModel(nn.Module):
+    # 生成用のz_rawを実データ(mu_real)へ引き寄せるカーネル重み付け(attract_to_latent_prior)+
     # decode + 標準化の逆変換 + existenceのSigmoidまで含めることで、
-    # web側はモデル固有の後処理(mean/std, sigmoid)を再実装せず、生スケールのストローク特徴量と
-    # 存在確率をそのまま受け取れるようにする
-    def __init__(self, model: VAE, shape: ModelShape, mean: torch.Tensor, std: torch.Tensor) -> None:
+    # web側は学習データの統計的な性質を一切知らず、生成用のzをそのまま渡すだけでよくなる
+    def __init__(
+        self, model: VAE, shape: ModelShape, mean: torch.Tensor, std: torch.Tensor, mu_real: torch.Tensor
+    ) -> None:
         super().__init__()
         self.model = model
         self.shape = shape
         self.register_buffer("mean", mean)
         self.register_buffer("std", std)
+        self.register_buffer("mu_real", mu_real)
 
-    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, z_raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        z = attract_to_latent_prior(z_raw, self.mu_real)
         recon = self.model.decode(z)
         strokes, existence_logits = unflatten_output(recon, self.shape)
         strokes = strokes * self.std + self.mean
@@ -52,8 +57,11 @@ def main() -> None:
     # エクスポートはCPU上で行う(推論性能は問題にならず、デバイス依存の挙動差を避けるため)
     device = torch.device("cpu")
     checkpoint = load_checkpoint(device)
+    train_data = load_train_data(checkpoint, device)
+    mu_real, _ = encode(checkpoint, train_data.strokes_standardized, train_data.existence_tensor)
+
     generation_model = _GenerationModel(
-        checkpoint.model, checkpoint.shape, checkpoint.mean, checkpoint.std
+        checkpoint.model, checkpoint.shape, checkpoint.mean, checkpoint.std, mu_real
     )
     generation_model.eval()
 
@@ -70,7 +78,8 @@ def main() -> None:
         output_names=["strokes", "existence_prob"],
         dynamic_shapes=({0: batch},),
         opset_version=OPSET_VERSION,
-        # モデルが小さく(数百KB)、外部データファイルに分ける利点がないため単一ファイルにまとめる
+        # mu_real(学習データ全件のencode結果)を含めても数MB程度で、外部データファイルに
+        # 分ける利点がないため単一ファイルにまとめる
         external_data=False,
     )
     print(f"Saved ONNX model to {ONNX_PATH}")

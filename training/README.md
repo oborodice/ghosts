@@ -36,18 +36,14 @@ $ uv run scripts/evaluate_vae.py
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する
 $ uv run scripts/visualize_reconstruction.py
 
-# 事前分布N(0,I)からサンプリングしたzのdecode結果を目視確認する
+# 事前分布N(0,I)からサンプリングし、実データへカーネル重み付けで引き寄せた後のzのdecode結果を目視確認する
 $ uv run scripts/visualize_prior_samples.py
 
 # validationの2サンプル間を潜在空間上で線形補間し、字形が滑らかに変化するか目視確認する
 $ uv run scripts/visualize_latent_interpolation.py
 
 # 学習済みモデル(vae_phase1.pt)をONNX形式でエクスポートし、web/public/vae_phase1.onnxへ保存する
-# (web側で読み込めるよう、decode・標準化の逆変換・existenceのSigmoidまでを1つのグラフに含める)
+# (web側で読み込めるよう、生成用zの実データへのカーネル重み付け・decode・標準化の逆変換・existenceの
+# Sigmoidまでを1つのグラフに含める)
 $ uv run scripts/export_onnx.py
-
-# 学習データ全件のencode結果(mu)をweb/public/latent_prior.binへ保存する
-# (web側が生成時のzを実データ付近へ引き寄せるカーネル重み付けに使う。幽霊文字の生成モデル(モデル設計・フェーズ2).md の
-# 「生成品質(潜在空間の構造)の検証」参照)
-$ uv run scripts/export_latent_prior.py
 ```

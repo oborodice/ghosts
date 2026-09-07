@@ -15,9 +15,6 @@ dist-ssr
 # 学習側で生成するモデル成果物(training/scripts/export_onnx.pyが出力する)
 *.onnx
 
-# 学習側で生成するモデル成果物(training/scripts/export_latent_prior.pyが出力する)
-latent_prior.bin
-
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
