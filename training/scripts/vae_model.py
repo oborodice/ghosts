@@ -5,7 +5,7 @@ from typing import NamedTuple
 import torch
 import torch.nn as nn
 
-HIDDEN_DIMS: tuple[int, int] = (256, 128)
+HIDDEN_DIMS: tuple[int, int] = (768, 384)
 LATENT_DIM = 32
 
 # 学習時の保存先であると同時に、将来の推論/生成スクリプトの読み込み先でもある
