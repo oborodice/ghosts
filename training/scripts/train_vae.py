@@ -22,7 +22,7 @@ from vae_model import (
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "stroke_features.npz"
 
 BETA = 1.0
-KL_ANNEALING_EPOCHS = 30  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)
+KL_ANNEALING_EPOCHS = 60  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)。30から60への延長でdead dimensionsが減ることを検証済み
 ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_lossと同程度のスケールになるよう設計してある)
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
