@@ -13,6 +13,7 @@
     "vite": "^8.2.2"
   },
   "dependencies": {
-    "onnxruntime-web": "^1.29.0"
+    "onnxruntime-web": "^1.29.0",
+    "simplex-noise": "^4.0.3"
   }
 }

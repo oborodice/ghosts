@@ -1,5 +1,6 @@
 import "./style.css";
-import { LATENT_DIM, generate, loadModel } from "./model";
+import { latentAt } from "./latentWalk";
+import { generate, loadModel } from "./model";
 import { drawStrokes } from "./render";
 
 function getCanvasContext(): CanvasRenderingContext2D {
@@ -11,8 +12,13 @@ async function main(): Promise<void> {
   const session = await loadModel();
   const ctx = getCanvasContext();
 
-  const result = await generate(session, new Float32Array(LATENT_DIM));
-  drawStrokes(ctx, result);
+  // 前フレームの推論が終わるまで次のrequestAnimationFrameを呼ばないため、フレームが重なって溜まることはない
+  async function renderFrame(timeMs: number): Promise<void> {
+    const result = await generate(session, latentAt(timeMs / 1000));
+    drawStrokes(ctx, result);
+    requestAnimationFrame(renderFrame);
+  }
+  requestAnimationFrame(renderFrame);
 }
 
 main();
