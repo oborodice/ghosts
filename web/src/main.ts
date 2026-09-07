@@ -1,14 +1,18 @@
 import "./style.css";
 import { LATENT_DIM, generate, loadModel } from "./model";
+import { drawStrokes } from "./render";
+
+function getCanvasContext(): CanvasRenderingContext2D {
+  const canvas = document.querySelector<HTMLCanvasElement>("#kanji-canvas")!;
+  return canvas.getContext("2d")!;
+}
 
 async function main(): Promise<void> {
   const session = await loadModel();
-  console.log("Loaded ONNX model.", { inputs: session.inputNames, outputs: session.outputNames });
+  const ctx = getCanvasContext();
 
-  // 読み込んだモデルが実際に推論できるか確認するため、ゼロベクトルを1回流してみる
-  const { strokes, existenceProb } = await generate(session, new Float32Array(LATENT_DIM));
-  console.log("strokes:", strokes);
-  console.log("existence_prob:", existenceProb);
+  const result = await generate(session, new Float32Array(LATENT_DIM));
+  drawStrokes(ctx, result);
 }
 
 main();
