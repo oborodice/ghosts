@@ -5,8 +5,8 @@ import { LATENT_DIM } from "./model";
 // 潜在次元ごとに独立したノイズ場を使うことで、各次元が互いに無関係に変化するようにする
 const noises = Array.from({ length: LATENT_DIM }, () => createNoise2D());
 
-// 1文字がおよそ5秒で変容する速さを初期値とする
-const SPEED = 1 / 5;
+// 1文字がおよそ15秒で変容する速さを初期値とする
+const SPEED = 1 / 15;
 
 // simplex-noiseの出力はおおよそ[-1, 1]だが、学習時の事前分布はN(0, 1)であり本来もっと広い範囲を取りうるため、
 // 潜在空間をある程度の範囲まで探索できるようこの倍率で拡大する
