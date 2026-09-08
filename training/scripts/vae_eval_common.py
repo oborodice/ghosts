@@ -39,14 +39,14 @@ def _build_split_data(
 
 
 def load_validation_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
-    strokes, existence = load_stroke_features()
+    strokes, existence, _ = load_stroke_features()
     # train_vae.pyと同じSEEDでスプリットを再現し、学習に使っていないデータのみを対象にする
     _, val_indices = split_train_val_indices(len(strokes))
     return _build_split_data(val_indices, strokes, existence, checkpoint, device)
 
 
 def load_train_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
-    strokes, existence = load_stroke_features()
+    strokes, existence, _ = load_stroke_features()
     # train_vae.pyと同じSEEDでスプリットを再現し、学習に使ったデータのみを対象にする
     # (丸暗記化の確認、生成時のカーネル重み付けに使う実データ全体のencode結果の取得などに使う)
     train_indices, _ = split_train_val_indices(len(strokes))

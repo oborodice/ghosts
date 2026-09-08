@@ -24,6 +24,7 @@ DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "stroke_features.n
 BETA = 1.0
 KL_ANNEALING_EPOCHS = 60  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)。30から60への延長でdead dimensionsが減ることを検証済み
 ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_lossと同程度のスケールになるよう設計してある)
+CONNECTION_LOSS_WEIGHT = 5.0  # 接続点一致損失に掛ける重み。weight sweepの結果、strokes_mseを悪化させずに接続距離を改善できる上限がこの付近だった(10以上ではstrokes_mseが明確に悪化する)
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
 VAL_SPLIT = 0.1
@@ -33,9 +34,9 @@ MAX_EPOCHS = 1000  # early stoppingが正常なら到達しない安全上限
 STD_EPSILON = 1e-8  # 分散が0の特徴量があった場合のゼロ割回避
 
 
-def load_stroke_features() -> tuple[np.ndarray, np.ndarray]:
+def load_stroke_features() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     data = np.load(DATA_PATH)
-    return data["strokes"], data["existence"]
+    return data["strokes"], data["existence"], data["connections"]
 
 
 def split_train_val_indices(kanji_count: int) -> tuple[np.ndarray, np.ndarray]:
@@ -59,10 +60,13 @@ def standardize(strokes: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.nd
     return (strokes - mean) / std
 
 
-def _build_dataset(indices: np.ndarray, strokes: np.ndarray, existence: np.ndarray) -> TensorDataset:
+def _build_dataset(
+    indices: np.ndarray, strokes: np.ndarray, existence: np.ndarray, connections: np.ndarray
+) -> TensorDataset:
     return TensorDataset(
         torch.tensor(strokes[indices], dtype=torch.float32),
         torch.tensor(existence[indices], dtype=torch.float32),
+        torch.tensor(connections[indices], dtype=torch.float32),
     )
 
 
@@ -75,7 +79,7 @@ class Datasets(NamedTuple):
 
 
 def _prepare_datasets() -> Datasets:
-    strokes, existence = load_stroke_features()
+    strokes, existence, connections = load_stroke_features()
     kanji_count, slot_count, feature_dim = strokes.shape
     shape = ModelShape(slot_count, feature_dim)
 
@@ -83,8 +87,8 @@ def _prepare_datasets() -> Datasets:
     mean, std = _compute_standardization_stats(strokes, existence, train_indices)
     strokes_standardized = standardize(strokes, mean, std)
 
-    train_dataset = _build_dataset(train_indices, strokes_standardized, existence)
-    val_dataset = _build_dataset(val_indices, strokes_standardized, existence)
+    train_dataset = _build_dataset(train_indices, strokes_standardized, existence, connections)
+    val_dataset = _build_dataset(val_indices, strokes_standardized, existence, connections)
     return Datasets(train_dataset, val_dataset, shape, mean, std)
 
 
@@ -102,6 +106,22 @@ def stroke_endpoints(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tenso
     return (end - mean[0:2]) / std[0:2]
 
 
+def stroke_points(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    # 接続点一致損失用に、各スロットの始点・終点を1つの点列にまとめる。並び順(偶数index=始点、
+    # 奇数index=終点)はextract_stroke_features.pyのconnections行列の点indexと対応させている
+    batch_size, slot_count, _ = strokes.shape
+    start = strokes[..., 0:2]
+    end = stroke_endpoints(strokes, mean, std)
+    return torch.stack([start, end], dim=2).reshape(batch_size, slot_count * 2, 2)
+
+
+def _compute_connection_loss(points: torch.Tensor, connections: torch.Tensor) -> torch.Tensor:
+    # connectionsは上三角のみが立っているので、立っているペアの座標同士の距離の二乗をそのまま合計すればよい
+    diff = points.unsqueeze(2) - points.unsqueeze(1)
+    dist_sq = (diff**2).sum(dim=-1)
+    return (dist_sq * connections).sum(dim=(1, 2)).mean()
+
+
 def _compute_loss(
     strokes: torch.Tensor,
     existence: torch.Tensor,
@@ -109,6 +129,7 @@ def _compute_loss(
     existence_logits: torch.Tensor,
     mu: torch.Tensor,
     logvar: torch.Tensor,
+    connections: torch.Tensor,
     beta: float,
     mean: torch.Tensor,
     std: torch.Tensor,
@@ -130,7 +151,18 @@ def _compute_loss(
     end_recon = stroke_endpoints(strokes_recon, mean, std)
     endpoint_loss = (((end_recon - end_true) ** 2) * mask).sum(dim=(1, 2)).mean()
 
-    return strokes_loss + existence_loss + beta * kl_divergence + ENDPOINT_LOSS_WEIGHT * endpoint_loss
+    # endpoint_loss(終点MSE)は各ストロークの終点を独立に正解へ近づけるだけで、接続しているはずの
+    # 別スロット同士が再構成後も一致する保証はない。接続点一致損失で再構成後の該当点同士を直接近づける
+    points_recon = stroke_points(strokes_recon, mean, std)
+    connection_loss = _compute_connection_loss(points_recon, connections)
+
+    return (
+        strokes_loss
+        + existence_loss
+        + beta * kl_divergence
+        + ENDPOINT_LOSS_WEIGHT * endpoint_loss
+        + CONNECTION_LOSS_WEIGHT * connection_loss
+    )
 
 
 def _run_epoch(
@@ -149,8 +181,10 @@ def _run_epoch(
 
     total_loss = 0.0
     with torch.set_grad_enabled(is_training):
-        for strokes_batch, existence_batch in loader:
-            strokes_batch, existence_batch = strokes_batch.to(device), existence_batch.to(device)
+        for strokes_batch, existence_batch, connections_batch in loader:
+            strokes_batch = strokes_batch.to(device)
+            existence_batch = existence_batch.to(device)
+            connections_batch = connections_batch.to(device)
             recon, mu, logvar = model(flatten_input(strokes_batch, existence_batch))
             strokes_recon, existence_logits = unflatten_output(recon, shape)
             loss = _compute_loss(
@@ -160,6 +194,7 @@ def _run_epoch(
                 existence_logits,
                 mu,
                 logvar,
+                connections_batch,
                 beta,
                 mean,
                 std,
