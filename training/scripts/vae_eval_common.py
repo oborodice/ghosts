@@ -20,12 +20,18 @@ KERNEL_BANDWIDTH = 0.6
 class SplitData(NamedTuple):
     strokes: np.ndarray  # 標準化前(可視化・誤差計算の元データ用)
     existence: np.ndarray
+    connections: np.ndarray
     strokes_standardized: torch.Tensor  # モデル入力用
     existence_tensor: torch.Tensor
 
 
 def _build_split_data(
-    indices: np.ndarray, strokes: np.ndarray, existence: np.ndarray, checkpoint: Checkpoint, device: torch.device
+    indices: np.ndarray,
+    strokes: np.ndarray,
+    existence: np.ndarray,
+    connections: np.ndarray,
+    checkpoint: Checkpoint,
+    device: torch.device,
 ) -> SplitData:
     split_strokes, split_existence = strokes[indices], existence[indices]
     mean, std = checkpoint.mean.cpu().numpy(), checkpoint.std.cpu().numpy()
@@ -33,24 +39,25 @@ def _build_split_data(
     return SplitData(
         split_strokes,
         split_existence,
+        connections[indices],
         torch.tensor(split_strokes_standardized, dtype=torch.float32, device=device),
         torch.tensor(split_existence, dtype=torch.float32, device=device),
     )
 
 
 def load_validation_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
-    strokes, existence, _ = load_stroke_features()
+    strokes, existence, connections = load_stroke_features()
     # vae_data.pyと同じSEEDでスプリットを再現し、学習に使っていないデータのみを対象にする
     _, val_indices = split_train_val_indices(len(strokes))
-    return _build_split_data(val_indices, strokes, existence, checkpoint, device)
+    return _build_split_data(val_indices, strokes, existence, connections, checkpoint, device)
 
 
 def load_train_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
-    strokes, existence, _ = load_stroke_features()
+    strokes, existence, connections = load_stroke_features()
     # vae_data.pyと同じSEEDでスプリットを再現し、学習に使ったデータのみを対象にする
     # (丸暗記化の確認、生成時のカーネル重み付けに使う実データ全体のencode結果の取得などに使う)
     train_indices, _ = split_train_val_indices(len(strokes))
-    return _build_split_data(train_indices, strokes, existence, checkpoint, device)
+    return _build_split_data(train_indices, strokes, existence, connections, checkpoint, device)
 
 
 @torch.no_grad()
@@ -93,6 +100,37 @@ def draw_segments(ax: plt.Axes, segments: list[tuple[complex, complex]]) -> None
         ax.plot([start.real, end.real], [-start.imag, -end.imag], color="black")
     ax.set_aspect("equal")
     ax.axis("off")
+
+
+def _stroke_endpoints_array(strokes: np.ndarray) -> np.ndarray:
+    # 戻り値のshapeは(slot_count, 2, 2) -- [スロット, 始点(0)/終点(1), xy]。
+    # connections行列の点index(偶数=始点, 奇数=終点)と対応させるため、existenceに関わらず全スロット分計算する
+    start = strokes[:, 0:2]
+    angle = strokes[:, 2]
+    curvature = strokes[:, 3]
+    length = strokes[:, 4]
+    radius = length - curvature
+    direction = np.stack([np.cos(angle), np.sin(angle)], axis=-1)
+    end = start + radius[:, None] * direction
+    return np.stack([start, end], axis=1)
+
+
+def connection_centers(strokes: np.ndarray, connections: np.ndarray) -> list[complex]:
+    # connectionsは上三角のみが立っている(extract_stroke_features.py参照)ので、立っている
+    # 各ペアについて2点の中点をそのままズームイン表示の中心として返せばよい(重複は発生しない)
+    points = _stroke_endpoints_array(strokes).reshape(-1, 2)
+    pair_indices = np.argwhere(connections)
+    return [complex(*((points[i] + points[j]) / 2)) for i, j in pair_indices]
+
+
+def draw_segments_zoomed(
+    ax: plt.Axes, segments: list[tuple[complex, complex]], center: complex, margin: float
+) -> None:
+    # 接続点・交差点は文字全体のサムネイルでは小さすぎて崩れが見えないことがあるため、
+    # 特定の点の周辺だけを拡大表示する
+    draw_segments(ax, segments)
+    ax.set_xlim(center.real - margin, center.real + margin)
+    ax.set_ylim(-center.imag - margin, -center.imag + margin)
 
 
 def _destandardize(strokes_standardized: torch.Tensor, checkpoint: Checkpoint) -> torch.Tensor:
