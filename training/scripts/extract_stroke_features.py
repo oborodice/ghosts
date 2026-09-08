@@ -31,42 +31,84 @@ STROKE_NUMBER_PATTERN = re.compile(r"-s(\d+)$")
 # 接続点一致損失用。実データの端点間距離の分布を見ると、閾値未満の距離に「実際に接続している点」の
 # 集団が偏っており、4付近を谷にして「接続していない点同士のランダムな距離」の分布に切り替わる
 CONNECTION_THRESHOLD = 4.0
-# 折れ・ハネの検出用(_detect_corner参照)
+# 折れ・ハネの検出用(_find_corners参照)
 CORNER_SAMPLE_COUNT = 60
 CORNER_WINDOW = 6
 CORNER_ANGLE_THRESHOLD = 90.0  # 実データで「口」等の既知の折れ・ハネを検出できることを確認した値
+CORNER_MIN_SEPARATION = 0.15  # これ未満しか離れていない2つの角は同一の角とみなし、大きい方だけを残す
+MAX_CORNERS_PER_STROKE = 2  # 1ストロークに3箇所以上角があるケースは0.18%のみなので割り切る
 
 
 def _parse_stroke_number(path_element: ET.Element) -> int:
     return int(STROKE_NUMBER_PATTERN.search(path_element.get("id")).group(1))
 
 
-def _detect_corner(path: SvgPath) -> tuple[float, float]:
+def _corner_angle_profile(path: SvgPath) -> tuple[np.ndarray, np.ndarray]:
     # 等間隔なtでCORNER_SAMPLE_COUNT点の接線方向をサンプリングし、隣接点間の角度差を
-    # CORNER_WINDOW点(パス全体の約1/10)の幅で合計した最大値を「最も集中した方向転換」とする。
-    # セグメント境界(ベジェ曲線の繋ぎ目)での角度差をそのまま見る方法も試したが、ほとんどのstrokeで
-    # ほぼ0度であり機能しなかった。1本の滑らかな曲線が複数のベジェで近似されているだけのケースが
-    # ほとんどで、繋ぎ目自体が実際の折れ・ハネの位置とは限らないため、この方式を採用している
-    # 戻り値: (最も集中した方向転換の合計角度[度], パス全体に対するその位置の比率[0-1])
+    # CORNER_WINDOW点(パス全体の約1/10)の幅で合計する。セグメント境界(ベジェ曲線の繋ぎ目)での
+    # 角度差をそのまま見る方法も試したが、ほとんどのstrokeでほぼ0度であり機能しなかった。1本の
+    # 滑らかな曲線が複数のベジェで近似されているだけのケースがほとんどで、繋ぎ目自体が実際の
+    # 折れ・ハネの位置とは限らないため、この方式を採用している
+    # 戻り値: (ウィンドウごとの合計角度変化[度], パス全体に対する各ウィンドウ中心の位置比率[0-1])
     ts = np.linspace(0, 1, CORNER_SAMPLE_COUNT)
     tangents = np.array([path.derivative(t) for t in ts])
     angles = np.angle(tangents)
     diffs = np.abs(np.diff(angles))
     diffs = np.minimum(diffs, 2 * np.pi - diffs)
     diffs_deg = np.degrees(diffs)
-
     window_sums = np.convolve(diffs_deg, np.ones(CORNER_WINDOW), mode="valid")
-    max_index = window_sums.argmax()
-    # 角度変化が最大のウィンドウの中心位置を、折れ・ハネの位置とする
-    position_ratio = (max_index + CORNER_WINDOW / 2) / len(diffs_deg)
-    return window_sums[max_index], position_ratio
+    positions = (np.arange(len(window_sums)) + CORNER_WINDOW / 2) / len(diffs_deg)
+    return window_sums, positions
+
+
+def _corner_peaks(window_sums: np.ndarray, positions: np.ndarray) -> list[tuple[float, float]]:
+    # 閾値を超えた区間の集まり(山)ごとに最大値の位置を折れ・ハネの候補とする。1本のストロークに
+    # 横→縦の折れとハネの両方を持つケース(肉月の二画目など)があるため、山は1つとは限らない
+    above_threshold = window_sums >= CORNER_ANGLE_THRESHOLD
+    peaks: list[tuple[float, float]] = []
+    index = 0
+    while index < len(above_threshold):
+        if not above_threshold[index]:
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(above_threshold) and above_threshold[run_end]:
+            run_end += 1
+        peak_index = index + window_sums[index:run_end].argmax()
+        peaks.append((window_sums[peak_index], positions[peak_index]))
+        index = run_end
+    return peaks
+
+
+def _merge_nearby_corners(peaks: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    # 隣接する山同士がCORNER_MIN_SEPARATION未満しか離れていない場合は同一の角とみなし、大きい方だけ残す
+    corners: list[tuple[float, float]] = []
+    for angle, position in peaks:
+        if corners and position - corners[-1][1] < CORNER_MIN_SEPARATION:
+            if angle > corners[-1][0]:
+                corners[-1] = (angle, position)
+        else:
+            corners.append((angle, position))
+    return corners
+
+
+def _find_corners(path: SvgPath) -> list[tuple[float, float]]:
+    # 戻り値: [(方向転換の合計角度[度], パス全体に対するその位置の比率[0-1]), ...]
+    window_sums, positions = _corner_angle_profile(path)
+    peaks = _corner_peaks(window_sums, positions)
+    corners = _merge_nearby_corners(peaks)
+    corners.sort(key=lambda corner: corner[0], reverse=True)
+    return corners[:MAX_CORNERS_PER_STROKE]
 
 
 def _split_at_corner(path: SvgPath) -> list[SvgPath]:
-    max_angle, position_ratio = _detect_corner(path)
-    if max_angle < CORNER_ANGLE_THRESHOLD:
+    corners = _find_corners(path)
+    if not corners:
         return [path]
-    return [path.cropped(0, position_ratio), path.cropped(position_ratio, 1)]
+    # _find_cornersの戻り値は角度の大きい順なので、分割点として使うにはパス上の位置順に並べ直す
+    positions = sorted(position for _, position in corners)
+    boundaries = [0.0, *positions, 1.0]
+    return [path.cropped(boundaries[i], boundaries[i + 1]) for i in range(len(boundaries) - 1)]
 
 
 def _compute_stroke_features(path: SvgPath) -> StrokeFeatures:
