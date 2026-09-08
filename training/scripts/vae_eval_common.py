@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from train_vae import load_stroke_features, split_train_val_indices, standardize
 from vae_checkpoint import Checkpoint
+from vae_data import load_stroke_features, split_train_val_indices, standardize
 from vae_model import flatten_input, unflatten_output
 
 # existenceの確率(Sigmoid(existence_logits))をbool判定に変換する閾値。evaluate_vae.pyの正答率算出とも共有する
@@ -40,14 +40,14 @@ def _build_split_data(
 
 def load_validation_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
     strokes, existence, _ = load_stroke_features()
-    # train_vae.pyと同じSEEDでスプリットを再現し、学習に使っていないデータのみを対象にする
+    # vae_data.pyと同じSEEDでスプリットを再現し、学習に使っていないデータのみを対象にする
     _, val_indices = split_train_val_indices(len(strokes))
     return _build_split_data(val_indices, strokes, existence, checkpoint, device)
 
 
 def load_train_data(checkpoint: Checkpoint, device: torch.device) -> SplitData:
     strokes, existence, _ = load_stroke_features()
-    # train_vae.pyと同じSEEDでスプリットを再現し、学習に使ったデータのみを対象にする
+    # vae_data.pyと同じSEEDでスプリットを再現し、学習に使ったデータのみを対象にする
     # (丸暗記化の確認、生成時のカーネル重み付けに使う実データ全体のencode結果の取得などに使う)
     train_indices, _ = split_train_val_indices(len(strokes))
     return _build_split_data(train_indices, strokes, existence, checkpoint, device)

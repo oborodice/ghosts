@@ -5,9 +5,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from train_vae import stroke_endpoints
 from vae_checkpoint import load_checkpoint
 from vae_eval_common import existence_mask_from_logits, load_train_data, load_validation_data
+from vae_losses import stroke_endpoints
 from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_output
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
@@ -31,7 +31,7 @@ def _print_loss_breakdown(
     result: ForwardResult, kl_per_dim: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
 ) -> None:
     print("== 1. Loss breakdown ==")
-    # train_vae._compute_lossと同じ集約方法(sum→batch mean)で個別に集計する
+    # vae_losses.compute_lossと同じ集約方法(sum→batch mean)で個別に集計する
     strokes, existence, strokes_recon, existence_logits = result
     mask = existence.unsqueeze(-1)
     strokes_loss = (((strokes_recon - strokes) ** 2) * mask).sum(dim=(1, 2)).mean()
