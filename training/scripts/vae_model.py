@@ -9,7 +9,7 @@ HIDDEN_DIMS: tuple[int, int] = (768, 384)
 LATENT_DIM = 32
 
 # 学習時の保存先であると同時に、将来の推論/生成スクリプトの読み込み先でもある
-CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "vae_phase1.pt"
+CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "vae.pt"
 
 
 class ModelShape(NamedTuple):

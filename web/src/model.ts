@@ -1,7 +1,7 @@
 import * as ort from "onnxruntime-web";
 
 // training/scripts/export_onnx.pyが出力するVAEデコーダのONNXモデル
-const MODEL_URL = "/vae_phase1.onnx";
+const MODEL_URL = "/vae.onnx";
 
 export const LATENT_DIM = 32; // training/scripts/vae_model.pyのLATENT_DIMと同じ値
 

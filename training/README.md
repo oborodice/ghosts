@@ -26,10 +26,10 @@ $ uv run scripts/stroke_count_stats.py
 # data/stroke_features.npzへ保存する(画数がスロット数(22)を超える漢字は除外する)
 $ uv run scripts/extract_stroke_features.py
 
-# フェーズ1のVAEを学習し、data/checkpoints/vae_phase1.ptへ保存する
+# VAEを学習し、data/checkpoints/vae.ptへ保存する
 $ uv run scripts/train_vae.py
 
-# 学習済みモデル(vae_phase1.pt)の品質を数値で確認する
+# 学習済みモデル(vae.pt)の品質を数値で確認する
 # (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布、丸暗記化していないかの確認)
 $ uv run scripts/evaluate_vae.py
 
@@ -42,7 +42,7 @@ $ uv run scripts/visualize_prior_samples.py
 # validationの2サンプル間を潜在空間上で線形補間し、字形が滑らかに変化するか目視確認する
 $ uv run scripts/visualize_latent_interpolation.py
 
-# 学習済みモデル(vae_phase1.pt)をONNX形式でエクスポートし、web/public/vae_phase1.onnxへ保存する
+# 学習済みモデル(vae.pt)をONNX形式でエクスポートし、web/public/vae.onnxへ保存する
 # (web側で読み込めるよう、生成用zの実データへのカーネル重み付け・decode・標準化の逆変換・existenceの
 # Sigmoidまでを1つのグラフに含める)
 $ uv run scripts/export_onnx.py

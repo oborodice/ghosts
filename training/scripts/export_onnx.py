@@ -12,7 +12,7 @@ from vae_eval_common import attract_to_latent_prior, encode, load_train_data
 from vae_model import VAE, ModelShape, unflatten_output
 
 # webがfetchして読み込む配置場所(training/dataではなくweb/publicに置く)
-ONNX_PATH = Path(__file__).resolve().parent.parent.parent / "web" / "public" / "vae_phase1.onnx"
+ONNX_PATH = Path(__file__).resolve().parent.parent.parent / "web" / "public" / "vae.onnx"
 
 OPSET_VERSION = 18  # 使用する演算(Linear, ReLU, Sigmoidなど)はいずれも古くから存在し、特定opsetを要求する要素はないため、比較的新しく安定している値を選んだ
 VERIFICATION_BATCH_SIZE = 4  # エクスポート時のダミー入力(バッチサイズ1)とは異なるサイズで、可変バッチが実際に機能するか確認する
