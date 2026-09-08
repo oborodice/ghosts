@@ -12,6 +12,7 @@ from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_o
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
 WORST_SAMPLE_COUNT = 5
+DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の始点座標の距離がこれ未満なら、デコーダが同じストロークを複数スロットに重複して割り当てているとみなす閾値(目視確認と概ね整合する値)
 
 
 class ForwardResult(NamedTuple):
@@ -148,6 +149,33 @@ def _print_memorization_check(
     print()
 
 
+def _count_duplicate_slots(strokes_recon: torch.Tensor, existence_mask: torch.Tensor) -> np.ndarray:
+    # 各サンプルで、存在すると判定されたスロット同士の始点位置が極端に近いペアを数える
+    counts = []
+    for sample_idx in range(strokes_recon.shape[0]):
+        active_indices = existence_mask[sample_idx].nonzero(as_tuple=True)[0]
+        positions = strokes_recon[sample_idx, active_indices, 0:2]
+        if len(active_indices) < 2:
+            counts.append(0)
+            continue
+        distance = torch.cdist(positions, positions)
+        distance.fill_diagonal_(float("inf"))
+        # 対称行列のためペア(i, j)と(j, i)の両方がカウントされる。2で割って実際のペア数に直す
+        counts.append((distance < DUPLICATE_POSITION_THRESHOLD).sum().item() // 2)
+    return np.array(counts)
+
+
+def _print_duplicate_slots(result: ForwardResult) -> None:
+    print("== 6. Duplicate slot check ==")
+    _, _, strokes_recon, existence_logits = result
+    existence_mask = torch.from_numpy(existence_mask_from_logits(existence_logits))
+    duplicate_counts = _count_duplicate_slots(strokes_recon, existence_mask)
+
+    print(f"Samples with >=1 near-duplicate slot pair: {(duplicate_counts > 0).sum()} / {len(duplicate_counts)}")
+    print(f"Average near-duplicate pairs per sample: {duplicate_counts.mean():.4f}")
+    print()
+
+
 def main() -> None:
     device = select_device()
     checkpoint = load_checkpoint(device)
@@ -183,6 +211,7 @@ def main() -> None:
     _print_weight_health(checkpoint.model)
     _print_error_distribution(result_deterministic)
     _print_memorization_check(result_deterministic, train_result, logvar, train_logvar, kl_per_dim)
+    _print_duplicate_slots(result_deterministic)
 
 
 if __name__ == "__main__":
