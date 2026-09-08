@@ -9,6 +9,8 @@ from vae_data import AngleGMMParams
 
 ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_lossと同程度のスケールになるよう設計してある)
 CONNECTION_LOSS_WEIGHT = 5.0  # 接続点一致損失に掛ける重み。weight sweepの結果、strokes_mseを悪化させずに接続距離を改善できる上限がこの付近だった(10以上ではstrokes_mseが明確に悪化する)
+CONNECTION_LENGTH_WEIGHT_CAP = 3.0  # 接続ペアの重みの上限倍率(_connection_pair_weights参照)。weight sweepの結果、ハネ由来の短いペアの接続距離改善の大部分(3.0で-18.7%、5.0でも-24.8%と伸びが鈍化)をstrokes_mseへの悪化がほぼない(+0.3%)うちに得られる値
+CONNECTION_LENGTH_EPSILON = 1e-6  # 0除算回避(existence=0のpaddingスロットは長さ0になるため)
 ANGLE_NATURALNESS_LOSS_WEIGHT = 1.0  # 角度の自然さ損失に掛ける重み。weight sweepの結果、strokes_mseの悪化を+11%程度に抑えつつ角度対数密度の改善が最大だった値(2.0以上ではコストが増える一方、密度改善はむしろ弱まった)
 
 
@@ -50,11 +52,24 @@ def _stroke_points(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor)
     return torch.stack([start, end], dim=2).reshape(batch_size, slot_count * 2, 2)
 
 
-def _compute_connection_loss(points: torch.Tensor, connections: torch.Tensor) -> torch.Tensor:
+def _connection_pair_weights(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    # ハネで分割されたセグメントは元のストロークの一部でしかなく長さが短いため、浮くと「短い孤立した
+    # 棒切れ」に見えて視覚的なダメージが大きい。そこで、ペアのうち短い方のセグメント長が平均より
+    # 短いほど、その接続ペアの重みを引き上げる(平均的な長さのペアは重み1.0のまま変化しない)
+    length = strokes[..., 4] * std[4] + mean[4]  # (B, slot_count)
+    point_length = torch.repeat_interleave(length, 2, dim=-1)  # (B, slot_count*2)。始点・終点は同じ長さを共有
+    min_length = torch.minimum(point_length.unsqueeze(-1), point_length.unsqueeze(-2))
+    min_length = torch.clamp(min_length, min=CONNECTION_LENGTH_EPSILON)
+    return torch.clamp(mean[4] / min_length, min=1.0, max=CONNECTION_LENGTH_WEIGHT_CAP)
+
+
+def _compute_connection_loss(
+    points: torch.Tensor, connections: torch.Tensor, weights: torch.Tensor
+) -> torch.Tensor:
     # connectionsは上三角のみが立っているので、立っているペアの座標同士の距離の二乗をそのまま合計すればよい
     diff = points.unsqueeze(2) - points.unsqueeze(1)
     dist_sq = (diff**2).sum(dim=-1)
-    return (dist_sq * connections).sum(dim=(1, 2)).mean()
+    return (dist_sq * connections * weights).sum(dim=(1, 2)).mean()
 
 
 class AngleGMM(NamedTuple):
@@ -131,7 +146,10 @@ def compute_loss(
     # endpoint_loss(終点MSE)は各ストロークの終点を独立に正解へ近づけるだけで、接続しているはずの
     # 別スロット同士が再構成後も一致する保証はない。接続点一致損失で再構成後の該当点同士を直接近づける
     points_recon = _stroke_points(strokes_recon, mean, std)
-    connection_loss = _compute_connection_loss(points_recon, connections)
+    # 重みは正解(strokes)側のセグメント長から決める。再構成側は崩れている可能性があり、
+    # どのペアがハネ由来かの判定基準として使うべきではないため
+    connection_weights = _connection_pair_weights(strokes, mean, std)
+    connection_loss = _compute_connection_loss(points_recon, connections, connection_weights)
 
     # 実データの角度分布から外れた(非典型的な)角度を再構成するほど損失が大きくなるようにする
     angle_naturalness_loss = _compute_angle_naturalness_loss(
