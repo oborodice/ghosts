@@ -10,11 +10,20 @@ from vae_model import (
     CHECKPOINT_PATH,
     HIDDEN_DIMS,
     LATENT_DIM,
+    SLOT_ATTENTION_FFN_DIM,
+    SLOT_ATTENTION_HEADS,
+    SLOT_ATTENTION_LAYERS,
+    SLOT_DIM,
     VAE,
     ModelShape,
+    SlotAttentionConfig,
     flatten_input,
     select_device,
     unflatten_output,
+)
+
+SLOT_ATTENTION_CONFIG = SlotAttentionConfig(
+    SLOT_DIM, SLOT_ATTENTION_HEADS, SLOT_ATTENTION_LAYERS, SLOT_ATTENTION_FFN_DIM
 )
 
 BETA = 1.0
@@ -85,6 +94,9 @@ def _save_checkpoint(model: VAE, shape: ModelShape, mean: np.ndarray, std: np.nd
             "model_state_dict": model.state_dict(),
             "hidden_dims": HIDDEN_DIMS,
             "latent_dim": LATENT_DIM,
+            # torch.loadのweights_only=True(デフォルト)はNamedTupleサブクラスを許可しないため、
+            # hidden_dimsと同じくプレーンなtupleとして保存する
+            "slot_attention_config": tuple(SLOT_ATTENTION_CONFIG),
             "slot_count": shape.slot_count,
             "feature_dim": shape.feature_dim,
             "mean": torch.tensor(mean, dtype=torch.float32),
@@ -108,7 +120,7 @@ def main() -> None:
     )
     val_loader = DataLoader(datasets.val, batch_size=BATCH_SIZE, shuffle=False)
 
-    model = VAE(datasets.shape, HIDDEN_DIMS, LATENT_DIM).to(device)
+    model = VAE(datasets.shape, HIDDEN_DIMS, LATENT_DIM, SLOT_ATTENTION_CONFIG).to(device)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     mean_tensor = torch.tensor(datasets.mean, dtype=torch.float32, device=device)
     std_tensor = torch.tensor(datasets.std, dtype=torch.float32, device=device)

@@ -11,6 +11,17 @@ HIDDEN_DIMS: tuple[int, int] = (1024, 512)
 # 誤差が改善しつつtrain/valギャップも縮小した(単なる丸暗記ではないことを示唆)ため採用した
 LATENT_DIM = 48
 
+# decoderのスロット間Self-Attentionに関するハイパーパラメータ
+# SLOT_DIMは128から変更。weight sweepの結果、128は旧デコーダの作業次元(512〜1024)と比べて
+# 容量不足(train/valギャップが小さい代わりにval側のstrokes_mse・交差数が悪い)で、512では
+# 逆にtrain/valギャップが拡大し過学習寄りになったため、間に位置する256を採用した
+SLOT_DIM = 256  # スロットごとの内部表現の次元
+SLOT_ATTENTION_HEADS = 4  # 未検証(たたき台)
+# 2から変更。weight sweepの結果、2→3は交差数・斜め関与・3本合流を含む全指標が改善したが、
+# 3→4ではほぼ全指標が悪化(dead_dimsも増加)に転じたため、間に位置する3を採用した
+SLOT_ATTENTION_LAYERS = 3
+SLOT_ATTENTION_FFN_DIM = 512  # SLOT_DIMの2倍を保つ形で連動させている
+
 # 学習時の保存先であると同時に、将来の推論/生成スクリプトの読み込み先でもある
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "vae.pt"
 
@@ -25,8 +36,51 @@ class ModelShape(NamedTuple):
         return self.slot_count * self.feature_dim + self.slot_count
 
 
+class SlotAttentionConfig(NamedTuple):
+    slot_dim: int
+    num_heads: int
+    num_layers: int
+    ffn_dim: int
+
+
+class SlotAttentionDecoder(nn.Module):
+    # 各スロットが他のスロットの出力を参照しながらストロークパラメータを決められるよう、
+    # DETRの学習可能なobject queryに近い発想で、スロットごとの埋め込み+zの文脈をSelf-Attentionで
+    # 相互参照させてから、スロットごとに読み出す。出力はunflatten_outputとの互換のため
+    # 従来通りのflat(strokes→existenceの順)なベクトルにして返す
+    def __init__(self, shape: ModelShape, latent_dim: int, config: SlotAttentionConfig) -> None:
+        super().__init__()
+        self.slot_queries = nn.Parameter(torch.randn(shape.slot_count, config.slot_dim))
+        self.z_to_context = nn.Linear(latent_dim, config.slot_dim)
+        layer = nn.TransformerEncoderLayer(
+            d_model=config.slot_dim,
+            nhead=config.num_heads,
+            dim_feedforward=config.ffn_dim,
+            batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(layer, num_layers=config.num_layers)
+        self.feature_head = nn.Linear(config.slot_dim, shape.feature_dim)
+        self.existence_head = nn.Linear(config.slot_dim, 1)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        context = self.z_to_context(z).unsqueeze(1)  # (B, 1, SLOT_DIM)
+        # slot_queries: (1, slot_count, SLOT_DIM) + context: (B, 1, SLOT_DIM) はbroadcastで
+        # (B, slot_count, SLOT_DIM)になる(バッチ方向の明示的なexpandは不要)
+        slots = self.slot_queries.unsqueeze(0) + context
+        slots = self.transformer(slots)
+        strokes_flat = self.feature_head(slots).flatten(1)
+        existence_logits = self.existence_head(slots).squeeze(-1)
+        return torch.cat([strokes_flat, existence_logits], dim=1)
+
+
 class VAE(nn.Module):
-    def __init__(self, shape: ModelShape, hidden_dims: tuple[int, int], latent_dim: int) -> None:
+    def __init__(
+        self,
+        shape: ModelShape,
+        hidden_dims: tuple[int, int],
+        latent_dim: int,
+        slot_attention_config: SlotAttentionConfig,
+    ) -> None:
         super().__init__()
         hidden1, hidden2 = hidden_dims
         self.encoder = nn.Sequential(
@@ -37,13 +91,7 @@ class VAE(nn.Module):
         )
         self.fc_mu = nn.Linear(hidden2, latent_dim)
         self.fc_logvar = nn.Linear(hidden2, latent_dim)
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden2),
-            nn.ReLU(),
-            nn.Linear(hidden2, hidden1),
-            nn.ReLU(),
-            nn.Linear(hidden1, shape.input_dim),
-        )
+        self.decoder = SlotAttentionDecoder(shape, latent_dim, slot_attention_config)
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         hidden = self.encoder(x)

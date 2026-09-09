@@ -5,7 +5,6 @@ import numpy as np
 import onnxruntime
 import torch
 import torch.nn as nn
-from torch.export import Dim
 
 from vae_checkpoint import load_checkpoint
 from vae_eval_common import attract_to_latent_prior, encode, load_train_data
@@ -15,7 +14,10 @@ from vae_model import VAE, ModelShape, unflatten_output
 ONNX_PATH = Path(__file__).resolve().parent.parent.parent / "web" / "public" / "vae.onnx"
 
 OPSET_VERSION = 18  # 使用する演算(Linear, ReLU, Sigmoidなど)はいずれも古くから存在し、特定opsetを要求する要素はないため、比較的新しく安定している値を選んだ
-VERIFICATION_BATCH_SIZE = 4  # エクスポート時のダミー入力(バッチサイズ1)とは異なるサイズで、可変バッチが実際に機能するか確認する
+# web側は1フレームにつき1文字しか生成しないため、バッチサイズは常に1で固定する。decoderに
+# nn.TransformerEncoderを導入した際、torch.onnx.exportの可変バッチ(dynamic_shapes)が
+# 効かなくなることを確認したため、元々不要だった可変バッチ対応自体を廃止した
+BATCH_SIZE = 1
 
 
 class _GenerationModel(nn.Module):
@@ -65,18 +67,15 @@ def main() -> None:
     )
     generation_model.eval()
 
-    # トレースはグラフの形状・構造を記録するだけで値自体は結果に影響しないため、値・バッチサイズは何でもよい
-    dummy_z = torch.zeros(1, checkpoint.latent_dim)
+    # トレースはグラフの形状・構造を記録するだけで値自体は結果に影響しないため、値は何でもよい
+    dummy_z = torch.zeros(BATCH_SIZE, checkpoint.latent_dim)
     ONNX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # バッチ軸を固定サイズにせず、推論時に任意のバッチサイズを受け付けられるようにする
-    batch = Dim("batch")
     torch.onnx.export(
         generation_model,
         (dummy_z,),
         str(ONNX_PATH),
         input_names=["z"],
         output_names=["strokes", "existence_prob"],
-        dynamic_shapes=({0: batch},),
         opset_version=OPSET_VERSION,
         # mu_real(学習データ全件のencode結果)を含めても数MB程度で、外部データファイルに
         # 分ける利点がないため単一ファイルにまとめる
@@ -84,7 +83,7 @@ def main() -> None:
     )
     print(f"Saved ONNX model to {ONNX_PATH}")
 
-    verification_z = torch.randn(VERIFICATION_BATCH_SIZE, checkpoint.latent_dim)
+    verification_z = torch.randn(BATCH_SIZE, checkpoint.latent_dim)
     _verify_export(generation_model, verification_z)
 
 

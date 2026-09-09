@@ -80,7 +80,7 @@ def _stroke_points_real(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Te
 
 
 def _nearby_pair_mask(existence: torch.Tensor, connections: torch.Tensor) -> torch.Tensor:
-    # 近傍点間隔一致損失の対象ペアを絞り込むマスク。対策2の接続点(距離ほぼ0、connection_lossが
+    # 近傍点間隔一致損失の対象ペアを絞り込むマスク。接続点一致損失が対象とする接続点(距離ほぼ0、connection_lossが
     # 既に担当)と、同一ストローク内の始点・終点ペア(strokes_loss側のlength特徴量が既に担当)は対象外にする
     slot_count = existence.shape[1]
     point_count = slot_count * 2
