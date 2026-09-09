@@ -3,7 +3,7 @@ import * as ort from "onnxruntime-web";
 // training/scripts/export_onnx.pyが出力するVAEデコーダのONNXモデル
 const MODEL_URL = "/vae.onnx";
 
-export const LATENT_DIM = 32; // training/scripts/vae_model.pyのLATENT_DIMと同じ値
+export const LATENT_DIM = 48; // training/scripts/vae_model.pyのLATENT_DIMと同じ値
 
 export interface GenerationResult {
   strokes: Float32Array;

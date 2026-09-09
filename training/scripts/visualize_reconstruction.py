@@ -5,12 +5,12 @@ import numpy as np
 from vae_checkpoint import load_checkpoint
 from vae_eval_common import (
     connection_centers,
-    decode_to_segments,
-    draw_segments,
-    draw_segments_zoomed,
+    decode_to_curves,
+    draw_curves,
+    draw_curves_zoomed,
     encode,
     load_validation_data,
-    strokes_to_segments,
+    strokes_to_curves,
 )
 from vae_model import select_device
 
@@ -22,8 +22,8 @@ MAX_ZOOMS_PER_SAMPLE = 4  # 1サンプルあたり表示する接続点の最大
 
 def _draw_connection_zooms(
     index: int,
-    original_segments: list[tuple[complex, complex]],
-    reconstructed_segments: list[tuple[complex, complex]],
+    original_curves: list[tuple[complex, complex, complex]],
+    reconstructed_curves: list[tuple[complex, complex, complex]],
     strokes: np.ndarray,
     connections: np.ndarray,
 ) -> None:
@@ -34,9 +34,9 @@ def _draw_connection_zooms(
         return
     _, axes = plt.subplots(nrows=2, ncols=len(centers), squeeze=False)
     for col, center in enumerate(centers):
-        draw_segments_zoomed(axes[0, col], original_segments, center, ZOOM_MARGIN)
+        draw_curves_zoomed(axes[0, col], original_curves, center, ZOOM_MARGIN)
         axes[0, col].set_title(f"idx {index} conn {col}")
-        draw_segments_zoomed(axes[1, col], reconstructed_segments, center, ZOOM_MARGIN)
+        draw_curves_zoomed(axes[1, col], reconstructed_curves, center, ZOOM_MARGIN)
 
 
 def main() -> None:
@@ -48,17 +48,17 @@ def main() -> None:
     existence = data.existence_tensor[SAMPLE_INDICES]
     # 再パラメータ化のサンプリングεによるランダム性を排除するため、muをそのままdecodeする
     mu, _ = encode(checkpoint, strokes, existence)
-    reconstructed_segments = decode_to_segments(checkpoint, mu)
+    reconstructed_curves = decode_to_curves(checkpoint, mu)
 
     _, axes = plt.subplots(nrows=2, ncols=len(SAMPLE_INDICES))
     for col, index in enumerate(SAMPLE_INDICES):
         original_mask = data.existence[index].astype(bool)
-        original_segments = strokes_to_segments(data.strokes[index], original_mask)
-        draw_segments(axes[0, col], original_segments)
+        original_curves = strokes_to_curves(data.strokes[index], original_mask)
+        draw_curves(axes[0, col], original_curves)
         axes[0, col].set_title(f"idx {index}")
-        draw_segments(axes[1, col], reconstructed_segments[col])
+        draw_curves(axes[1, col], reconstructed_curves[col])
         _draw_connection_zooms(
-            index, original_segments, reconstructed_segments[col], data.strokes[index], data.connections[index]
+            index, original_curves, reconstructed_curves[col], data.strokes[index], data.connections[index]
         )
 
     plt.show()

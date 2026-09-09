@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import torch
 
 from vae_checkpoint import load_checkpoint
-from vae_eval_common import attract_to_latent_prior, decode_to_segments, draw_segments, encode, load_train_data
+from vae_eval_common import attract_to_latent_prior, decode_to_curves, draw_curves, encode, load_train_data
 from vae_model import select_device
 
 SAMPLE_COUNT = 6
@@ -20,11 +20,11 @@ def main() -> None:
     # 生成時に実際には出現しない座標を見ることになる)
     z_raw = torch.randn(SAMPLE_COUNT, checkpoint.latent_dim, device=device)
     z = attract_to_latent_prior(z_raw, mu_real)
-    segments = decode_to_segments(checkpoint, z)
+    curves = decode_to_curves(checkpoint, z)
 
     _, axes = plt.subplots(nrows=1, ncols=SAMPLE_COUNT)
-    for ax, sample_segments in zip(axes, segments):
-        draw_segments(ax, sample_segments)
+    for ax, sample_curves in zip(axes, curves):
+        draw_curves(ax, sample_curves)
     plt.show()
 
 

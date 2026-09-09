@@ -6,7 +6,10 @@ import torch
 import torch.nn as nn
 
 HIDDEN_DIMS: tuple[int, int] = (1024, 512)
-LATENT_DIM = 32
+# 32から48に変更。曲線描画対応で追加したoffset_x/offset_yはdead dimensionsが0/32の状態でも
+# 他特徴量よりtrain誤差・train/valギャップが大きく、潜在次元の手狭さが疑われた。48ではreconstruction
+# 誤差が改善しつつtrain/valギャップも縮小した(単なる丸暗記ではないことを示唆)ため採用した
+LATENT_DIM = 48
 
 # 学習時の保存先であると同時に、将来の推論/生成スクリプトの読み込み先でもある
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "vae.pt"

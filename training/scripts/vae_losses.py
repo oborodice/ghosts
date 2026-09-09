@@ -17,15 +17,14 @@ ANGLE_NATURALNESS_LOSS_WEIGHT = 1.0  # 角度の自然さ損失に掛ける重�
 
 
 def stroke_endpoints(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
-    # cos/sinは実際のラジアン値でないと意味を持たないため、角度・長さ・曲率は一旦実スケールへ戻す
+    # cos/sinは実際のラジアン値でないと意味を持たないため、角度・長さは一旦実スケールへ戻す。
+    # lengthは弦(始点-終点間)の長さそのものなので、制御点オフセット(曲がり)の影響を受けない
     strokes_destd = strokes * std + mean
     start = strokes_destd[..., 0:2]
     angle = strokes_destd[..., 2]
-    curvature = strokes_destd[..., 3]
-    length = strokes_destd[..., 4]
-    radius = length - curvature
+    length = strokes_destd[..., 3]
     direction = torch.stack([torch.cos(angle), torch.sin(angle)], dim=-1)
-    end = start + radius.unsqueeze(-1) * direction
+    end = start + length.unsqueeze(-1) * direction
     # start_x, start_yと同じ統計量(mean/stdの先頭2要素)で標準化し、strokes_lossと比較可能なスケールに揃える
     return (end - mean[0:2]) / std[0:2]
 
@@ -58,11 +57,11 @@ def _connection_pair_weights(strokes: torch.Tensor, mean: torch.Tensor, std: tor
     # ハネで分割されたセグメントは元のストロークの一部でしかなく長さが短いため、浮くと「短い孤立した
     # 棒切れ」に見えて視覚的なダメージが大きい。そこで、ペアのうち短い方のセグメント長が平均より
     # 短いほど、その接続ペアの重みを引き上げる(平均的な長さのペアは重み1.0のまま変化しない)
-    length = strokes[..., 4] * std[4] + mean[4]  # (B, slot_count)
+    length = strokes[..., 3] * std[3] + mean[3]  # (B, slot_count)
     point_length = torch.repeat_interleave(length, 2, dim=-1)  # (B, slot_count*2)。始点・終点は同じ長さを共有
     min_length = torch.minimum(point_length.unsqueeze(-1), point_length.unsqueeze(-2))
     min_length = torch.clamp(min_length, min=CONNECTION_LENGTH_EPSILON)
-    return torch.clamp(mean[4] / min_length, min=1.0, max=CONNECTION_LENGTH_WEIGHT_CAP)
+    return torch.clamp(mean[3] / min_length, min=1.0, max=CONNECTION_LENGTH_WEIGHT_CAP)
 
 
 def _compute_connection_loss(

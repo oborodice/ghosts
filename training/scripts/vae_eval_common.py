@@ -4,6 +4,8 @@ from typing import NamedTuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.path import Path as MplPath
+from matplotlib.patches import PathPatch
 
 from vae_checkpoint import Checkpoint
 from vae_data import load_stroke_features, split_train_val_indices, standardize
@@ -79,25 +81,32 @@ def existence_mask_from_logits(existence_logits: torch.Tensor) -> np.ndarray:
     return (torch.sigmoid(existence_logits) > EXISTENCE_THRESHOLD).cpu().numpy()
 
 
-def strokes_to_segments(
+def strokes_to_curves(
     strokes: np.ndarray, existence_mask: np.ndarray
-) -> list[tuple[complex, complex]]:
-    # (start_x, start_y, angle, curvature, length) -> 始点-終点の線分
-    # curvatureは弧長と弦長の差のみを保持し曲がる向きは復元できないため、直線近似で描画する
-    segments = []
-    for (start_x, start_y, angle, curvature, length), exists in zip(strokes, existence_mask):
+) -> list[tuple[complex, complex, complex]]:
+    # (start_x, start_y, angle, length, offset_x, offset_y) -> (始点, 制御点, 終点)の2次ベジェ
+    # lengthは弦(始点-終点間)の長さ、制御点は弦の中点をoffset_x/offset_yだけずらした点
+    curves = []
+    for (start_x, start_y, angle, length, offset_x, offset_y), exists in zip(strokes, existence_mask):
         if not exists:
             continue
         start = complex(start_x, start_y)
-        end = start + (length - curvature) * complex(np.cos(angle), np.sin(angle))
-        segments.append((start, end))
-    return segments
+        end = start + length * complex(np.cos(angle), np.sin(angle))
+        control = (start + end) / 2 + complex(offset_x, offset_y)
+        curves.append((start, control, end))
+    return curves
 
 
-def draw_segments(ax: plt.Axes, segments: list[tuple[complex, complex]]) -> None:
-    for start, end in segments:
+def draw_curves(ax: plt.Axes, curves: list[tuple[complex, complex, complex]]) -> None:
+    for start, control, end in curves:
         # SVGはy軸が下向きのため、view_kanji.pyと同様上向きに合わせて反転する
-        ax.plot([start.real, end.real], [-start.imag, -end.imag], color="black")
+        path = MplPath(
+            [(start.real, -start.imag), (control.real, -control.imag), (end.real, -end.imag)],
+            [MplPath.MOVETO, MplPath.CURVE3, MplPath.CURVE3],
+        )
+        ax.add_patch(PathPatch(path, facecolor="none", edgecolor="black"))
+    # add_patchはax.plotと違ってビューを自動追従しないため、明示的にdataLimへ合わせる
+    ax.autoscale_view()
     ax.set_aspect("equal")
     ax.axis("off")
 
@@ -107,11 +116,9 @@ def _stroke_endpoints_array(strokes: np.ndarray) -> np.ndarray:
     # connections行列の点index(偶数=始点, 奇数=終点)と対応させるため、existenceに関わらず全スロット分計算する
     start = strokes[:, 0:2]
     angle = strokes[:, 2]
-    curvature = strokes[:, 3]
-    length = strokes[:, 4]
-    radius = length - curvature
+    length = strokes[:, 3]
     direction = np.stack([np.cos(angle), np.sin(angle)], axis=-1)
-    end = start + radius[:, None] * direction
+    end = start + length[:, None] * direction
     return np.stack([start, end], axis=1)
 
 
@@ -123,12 +130,12 @@ def connection_centers(strokes: np.ndarray, connections: np.ndarray) -> list[com
     return [complex(*((points[i] + points[j]) / 2)) for i, j in pair_indices]
 
 
-def draw_segments_zoomed(
-    ax: plt.Axes, segments: list[tuple[complex, complex]], center: complex, margin: float
+def draw_curves_zoomed(
+    ax: plt.Axes, curves: list[tuple[complex, complex, complex]], center: complex, margin: float
 ) -> None:
     # 接続点・交差点は文字全体のサムネイルでは小さすぎて崩れが見えないことがあるため、
     # 特定の点の周辺だけを拡大表示する
-    draw_segments(ax, segments)
+    draw_curves(ax, curves)
     ax.set_xlim(center.real - margin, center.real + margin)
     ax.set_ylim(-center.imag - margin, -center.imag + margin)
 
@@ -138,15 +145,15 @@ def _destandardize(strokes_standardized: torch.Tensor, checkpoint: Checkpoint) -
 
 
 @torch.no_grad()
-def decode_to_segments(
+def decode_to_curves(
     checkpoint: Checkpoint, z: torch.Tensor
-) -> list[list[tuple[complex, complex]]]:
-    # zはバッチ(複数サンプル)を想定し、サンプルごとの線分リストを返す
+) -> list[list[tuple[complex, complex, complex]]]:
+    # zはバッチ(複数サンプル)を想定し、サンプルごとの曲線リストを返す
     recon = checkpoint.model.decode(z)
     strokes_recon, existence_logits = unflatten_output(recon, checkpoint.shape)
     strokes_recon = _destandardize(strokes_recon, checkpoint).cpu().numpy()
     existence_mask = existence_mask_from_logits(existence_logits)
     return [
-        strokes_to_segments(strokes, mask)
+        strokes_to_curves(strokes, mask)
         for strokes, mask in zip(strokes_recon, existence_mask)
     ]
