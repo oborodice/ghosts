@@ -11,6 +11,8 @@ ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_loss�
 CONNECTION_LOSS_WEIGHT = 5.0  # 接続点一致損失に掛ける重み。weight sweepの結果、strokes_mseを悪化させずに接続距離を改善できる上限がこの付近だった(10以上ではstrokes_mseが明確に悪化する)
 CONNECTION_LENGTH_WEIGHT_CAP = 3.0  # 接続ペアの重みの上限倍率(_connection_pair_weights参照)。weight sweepの結果、ハネ由来の短いペアの接続距離改善の大部分(3.0で-18.7%、5.0でも-24.8%と伸びが鈍化)をstrokes_mseへの悪化がほぼない(+0.3%)うちに得られる値
 CONNECTION_LENGTH_EPSILON = 1e-6  # 0除算回避(existence=0のpaddingスロットは長さ0になるため)
+NEARBY_LOSS_WEIGHT = 0.03  # 近傍点間隔一致損失に掛ける重み。weight sweepの結果、duplicate_pairs・spacing_error_meanが単調に改善しstrokes_mseの悪化もない範囲の上限で、0.1以降は両指標とも悪化に転じる(損失の生の値が大きく、重みを上げすぎると学習全体が不安定化するため)
+NEARBY_DISTANCE_SCALE = 15.0  # 重みの減衰スケール。実データの非接続ペア距離分布(5〜10%ileが13.66〜17.94)を踏まえ、目・日等の格子状部首の間隔付近だけに重みが乗るよう選んだ
 ANGLE_NATURALNESS_LOSS_WEIGHT = 1.0  # 角度の自然さ損失に掛ける重み。weight sweepの結果、strokes_mseの悪化を+11%程度に抑えつつ角度対数密度の改善が最大だった値(2.0以上ではコストが増える一方、密度改善はむしろ弱まった)
 
 
@@ -70,6 +72,57 @@ def _compute_connection_loss(
     diff = points.unsqueeze(2) - points.unsqueeze(1)
     dist_sq = (diff**2).sum(dim=-1)
     return (dist_sq * connections * weights).sum(dim=(1, 2)).mean()
+
+
+def _stroke_points_real(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    # _stroke_pointsは接続点一致損失用に標準化スケールのまま返すが、近傍点間隔一致損失は
+    # NEARBY_DISTANCE_SCALE(実スケールの値)と比較するため、実スケールに戻したものが必要になる
+    return _stroke_points(strokes, mean, std) * std[0:2] + mean[0:2]
+
+
+def _nearby_pair_mask(existence: torch.Tensor, connections: torch.Tensor) -> torch.Tensor:
+    # 近傍点間隔一致損失の対象ペアを絞り込むマスク。対策2の接続点(距離ほぼ0、connection_lossが
+    # 既に担当)と、同一ストローク内の始点・終点ペア(strokes_loss側のlength特徴量が既に担当)は対象外にする
+    slot_count = existence.shape[1]
+    point_count = slot_count * 2
+    point_exist = torch.repeat_interleave(existence, 2, dim=-1)
+    exist_pair = point_exist.unsqueeze(2) * point_exist.unsqueeze(1)
+
+    slot_index = torch.arange(slot_count, device=existence.device)
+    same_point_or_slot = torch.eye(point_count, device=existence.device)
+    same_point_or_slot[2 * slot_index, 2 * slot_index + 1] = 1.0
+    same_point_or_slot[2 * slot_index + 1, 2 * slot_index] = 1.0
+    connections_full = connections + connections.transpose(-1, -2)
+
+    return exist_pair * (1.0 - same_point_or_slot.unsqueeze(0)) * (1.0 - connections_full)
+
+
+def _nearby_pair_targets(
+    strokes: torch.Tensor, existence: torch.Tensor, connections: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # 正解(strokes)側の実スケール距離から、近傍点間隔一致損失の目標距離と重みを求める
+    points = _stroke_points_real(strokes, mean, std)
+    diff = points.unsqueeze(2) - points.unsqueeze(1)
+    real_dist = diff.norm(dim=-1)
+
+    weight = torch.exp(-real_dist / NEARBY_DISTANCE_SCALE) * _nearby_pair_mask(existence, connections)
+    weight = torch.triu(weight, diagonal=1)  # connectionsと同じく上三角のみを使い、二重カウントを避ける
+    return real_dist, weight
+
+
+def _compute_nearby_spacing_loss(
+    strokes_recon: torch.Tensor,
+    real_dist: torch.Tensor,
+    weight: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
+    # 再構成後の距離を、正解ペア一律の目標(0)ではなく実データそのものの距離に近づける。これにより
+    # 「近いのが正解」のペアを壊さずに、その間隔だけを正確に保つよう学習させる
+    points_recon = _stroke_points_real(strokes_recon, mean, std)
+    diff = points_recon.unsqueeze(2) - points_recon.unsqueeze(1)
+    recon_dist = diff.norm(dim=-1)
+    return (weight * (recon_dist - real_dist) ** 2).sum(dim=(1, 2)).mean()
 
 
 class AngleGMM(NamedTuple):
@@ -151,6 +204,11 @@ def compute_loss(
     connection_weights = _connection_pair_weights(strokes, mean, std)
     connection_loss = _compute_connection_loss(points_recon, connections, connection_weights)
 
+    # 目・日等の格子状の部首は、実データで近い(しかし接続はしていない)ストローク同士の間隔が
+    # 再構成で保てず束になって潰れやすい(重複)。実データの間隔そのものを再構成の目標にする
+    nearby_dist, nearby_weight = _nearby_pair_targets(strokes, existence, connections, mean, std)
+    nearby_spacing_loss = _compute_nearby_spacing_loss(strokes_recon, nearby_dist, nearby_weight, mean, std)
+
     # 実データの角度分布から外れた(非典型的な)角度を再構成するほど損失が大きくなるようにする
     angle_naturalness_loss = _compute_angle_naturalness_loss(
         strokes, strokes_recon, existence, mean, std, angle_gmm
@@ -162,5 +220,6 @@ def compute_loss(
         + beta * kl_divergence
         + ENDPOINT_LOSS_WEIGHT * endpoint_loss
         + CONNECTION_LOSS_WEIGHT * connection_loss
+        + NEARBY_LOSS_WEIGHT * nearby_spacing_loss
         + ANGLE_NATURALNESS_LOSS_WEIGHT * angle_naturalness_loss
     )
