@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from vae_data import AngleGMMParams
 
 ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_lossと同程度のスケールになるよう設計してある)
-CONNECTION_LOSS_WEIGHT = 5.0  # 接続点一致損失に掛ける重み。weight sweepの結果、strokes_mseを悪化させずに接続距離を改善できる上限がこの付近だった(10以上ではstrokes_mseが明確に悪化する)
+CONNECTION_LOSS_WEIGHT = 12.0  # 接続点一致損失に掛ける重み。weight sweepの結果、12は接続距離を約1割改善しつつstrokes_mse・重複スロット等への悪影響が候補中最小だった値(16・20はいずれも副作用がより大きく、12→16→20の単調な関係にはなっていない)
 CONNECTION_LENGTH_WEIGHT_CAP = 3.0  # 接続ペアの重みの上限倍率(_connection_pair_weights参照)。weight sweepの結果、ハネ由来の短いペアの接続距離改善の大部分(3.0で-18.7%、5.0でも-24.8%と伸びが鈍化)をstrokes_mseへの悪化がほぼない(+0.3%)うちに得られる値
 CONNECTION_LENGTH_EPSILON = 1e-6  # 0除算回避(existence=0のpaddingスロットは長さ0になるため)
 NEARBY_LOSS_WEIGHT = 0.03  # 近傍点間隔一致損失に掛ける重み。weight sweepの結果、duplicate_pairs・spacing_error_meanが単調に改善しstrokes_mseの悪化もない範囲の上限で、0.1以降は両指標とも悪化に転じる(損失の生の値が大きく、重みを上げすぎると学習全体が不安定化するため)
