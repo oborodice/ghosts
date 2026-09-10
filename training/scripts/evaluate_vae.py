@@ -6,8 +6,15 @@ import torch
 import torch.nn.functional as F
 
 from vae_checkpoint import load_checkpoint
-from vae_eval_common import existence_mask_from_logits, load_train_data, load_validation_data
-from vae_losses import stroke_endpoints
+from vae_eval_common import (
+    classify_crossings,
+    count_triple_junctions,
+    existence_mask_from_logits,
+    load_train_data,
+    load_validation_data,
+    strokes_to_curves,
+)
+from vae_losses import _connection_pair_weights, _stroke_points, stroke_endpoints
 from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_output
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
@@ -176,11 +183,68 @@ def _print_duplicate_slots(result: ForwardResult) -> None:
     print()
 
 
+def _print_crossing_and_junction_check(result: ForwardResult, mean: torch.Tensor, std: torch.Tensor) -> None:
+    print("== 7. Crossing / 3-or-more-way junction check ==")
+    strokes, existence, strokes_recon, existence_logits = result
+    recon_existence_mask = existence_mask_from_logits(existence_logits)
+    strokes_real = (strokes * std + mean).cpu().numpy()
+    strokes_recon_real = (strokes_recon * std + mean).cpu().numpy()
+    existence_np = existence.cpu().numpy().astype(bool)
+
+    orig_total = orig_diag = recon_total = recon_diag = 0
+    orig_triple_counts: list[int] = []
+    recon_triple_counts: list[int] = []
+    n = strokes_real.shape[0]
+    for i in range(n):
+        orig_mask, recon_mask = existence_np[i], recon_existence_mask[i]
+        orig_curves = strokes_to_curves(strokes_real[i], orig_mask)
+        recon_curves = strokes_to_curves(strokes_recon_real[i], recon_mask)
+        orig_cls = classify_crossings(orig_curves, strokes_real[i][orig_mask, 2])
+        recon_cls = classify_crossings(recon_curves, strokes_recon_real[i][recon_mask, 2])
+        orig_total += orig_cls["total"]
+        orig_diag += orig_cls["diagonal_involved"]
+        recon_total += recon_cls["total"]
+        recon_diag += recon_cls["diagonal_involved"]
+        orig_triple_counts.append(count_triple_junctions(orig_curves))
+        recon_triple_counts.append(count_triple_junctions(recon_curves))
+
+    recon_triple = np.array(recon_triple_counts)
+    print(f"orig  crossings: avg={orig_total / n:.3f} (diagonal-involved avg={orig_diag / n:.3f})")
+    print(f"recon crossings: avg={recon_total / n:.3f} (diagonal-involved avg={recon_diag / n:.3f})")
+    print(f"orig  3-or-more-way junctions: avg={np.mean(orig_triple_counts):.3f}")
+    print(f"recon 3-or-more-way junctions: avg={recon_triple.mean():.3f}, ratio with >=1: {(recon_triple > 0).mean():.1%}")
+    print()
+
+
+def _print_connection_distance(
+    result: ForwardResult, connections: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> None:
+    print("== 8. Connection distance check ==")
+    strokes, _, strokes_recon, _ = result
+    # _connection_pair_weights(正解側の長さから決まる重み)は、compute_lossが短いセグメント
+    # (ハネ由来)に高い重みを掛けるのと同じ基準。weight>1のペアだけを取り出せば短いセグメントに絞り込める
+    weights = _connection_pair_weights(strokes, mean, std)
+    points_recon_real = _stroke_points(strokes_recon, mean, std) * std[0:2] + mean[0:2]
+    diff = points_recon_real.unsqueeze(2) - points_recon_real.unsqueeze(1)
+    dist_real = diff.norm(dim=-1)
+
+    connections_mask = connections.to(torch.bool)
+    all_dist = dist_real[connections_mask]
+    short_dist = dist_real[connections_mask & (weights > 1.0)]
+
+    print(f"all connections: mean distance={all_dist.mean().item():.3f} (n={all_dist.numel()})")
+    print(
+        f"short-segment (hane-like) connections: mean distance={short_dist.mean().item():.3f} (n={short_dist.numel()})"
+    )
+    print()
+
+
 def main() -> None:
     device = select_device()
     checkpoint = load_checkpoint(device)
     data = load_validation_data(checkpoint, device)
     train_data = load_train_data(checkpoint, device)
+    connections = torch.tensor(data.connections, dtype=torch.bool, device=device)
 
     with torch.no_grad():
         # 損失の内訳・KLはtrain_vaeのvalidation lossと同じ経路(サンプリングzを含むforward)で再現する
@@ -212,6 +276,8 @@ def main() -> None:
     _print_error_distribution(result_deterministic)
     _print_memorization_check(result_deterministic, train_result, logvar, train_logvar, kl_per_dim)
     _print_duplicate_slots(result_deterministic)
+    _print_crossing_and_junction_check(result_deterministic, checkpoint.mean, checkpoint.std)
+    _print_connection_distance(result_deterministic, connections, checkpoint.mean, checkpoint.std)
 
 
 if __name__ == "__main__":

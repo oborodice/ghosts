@@ -97,6 +97,135 @@ def strokes_to_curves(
     return curves
 
 
+SEGMENTS_PER_CURVE = 12  # ベジェ曲線をポリライン近似する際の線分数
+INTERIOR_RANGE = (0.08, 0.92)  # ストローク端点付近(接続点)を交差から除外する範囲
+AXIS_TOLERANCE_DEG = 15.0  # 0/90/180/270度からこの範囲内なら「軸方向(水平・垂直)」とみなす
+JUNCTION_CONNECTION_THRESHOLD = 4.0  # 3本以上合流の検出用。extract_stroke_features.CONNECTION_THRESHOLDと同じ
+JUNCTION_CLUSTER_RADIUS = 6.0  # 接続点・交差点同士を「同じ場所」とみなす半径
+
+
+def bezier_polyline(start: complex, control: complex, end: complex, n: int) -> np.ndarray:
+    ts = np.linspace(0, 1, n + 1)
+    pts = (1 - ts) ** 2 * start + 2 * (1 - ts) * ts * control + ts**2 * end
+    return np.stack([pts.real, pts.imag], axis=1)
+
+
+def _segment_intersection(
+    p1: np.ndarray, p2: np.ndarray, p3: np.ndarray, p4: np.ndarray
+) -> tuple[float, float] | None:
+    # p1->p2とp3->p4の交点をパラメータt(p1->p2上)・u(p3->p4上)で返す。平行ならNone
+    d1 = p2 - p1
+    d2 = p4 - p3
+    denom = d1[0] * d2[1] - d1[1] * d2[0]
+    if abs(denom) < 1e-12:
+        return None
+    diff = p3 - p1
+    t = (diff[0] * d2[1] - diff[1] * d2[0]) / denom
+    u = (diff[0] * d1[1] - diff[1] * d1[0]) / denom
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        return t, u
+    return None
+
+
+def _find_curve_intersections(
+    curves: list[tuple[complex, complex, complex]]
+) -> list[tuple[int, int, np.ndarray]]:
+    # ストローク中間での交差(端点付近=接続点は除外)を(i, j, 交点座標)の組で列挙する。
+    # find_crossing_pairs/find_interaction_pointsの共通処理
+    polylines = [bezier_polyline(s, c, e, SEGMENTS_PER_CURVE) for s, c, e in curves]
+    n = len(polylines)
+    intersections: list[tuple[int, int, np.ndarray]] = []
+    for i in range(n):
+        poly_i = polylines[i]
+        for j in range(i + 1, n):
+            poly_j = polylines[j]
+            found = False
+            for a in range(SEGMENTS_PER_CURVE):
+                if found:
+                    break
+                for b in range(SEGMENTS_PER_CURVE):
+                    res = _segment_intersection(poly_i[a], poly_i[a + 1], poly_j[b], poly_j[b + 1])
+                    if res is None:
+                        continue
+                    t_local, u_local = res
+                    pos_i = (a + t_local) / SEGMENTS_PER_CURVE
+                    pos_j = (b + u_local) / SEGMENTS_PER_CURVE
+                    if INTERIOR_RANGE[0] < pos_i < INTERIOR_RANGE[1] and INTERIOR_RANGE[0] < pos_j < INTERIOR_RANGE[1]:
+                        point = poly_i[a] + t_local * (poly_i[a + 1] - poly_i[a])
+                        intersections.append((i, j, point))
+                        found = True
+                        break
+    return intersections
+
+
+def find_crossing_pairs(curves: list[tuple[complex, complex, complex]]) -> list[tuple[int, int]]:
+    return [(i, j) for i, j, _ in _find_curve_intersections(curves)]
+
+
+def count_crossings(curves: list[tuple[complex, complex, complex]]) -> int:
+    return len(find_crossing_pairs(curves))
+
+
+def is_axis_aligned(angle_rad: float) -> bool:
+    deg = np.degrees(angle_rad) % 90
+    return deg < AXIS_TOLERANCE_DEG or deg > (90 - AXIS_TOLERANCE_DEG)
+
+
+def classify_crossings(curves: list[tuple[complex, complex, complex]], angles: np.ndarray) -> dict[str, int]:
+    # 交差ペアを「両方軸方向」か「斜めが関与」かに分類する。anglesはcurvesと同じ順番・同じ本数であること
+    pairs = find_crossing_pairs(curves)
+    both_axis = sum(1 for i, j in pairs if is_axis_aligned(angles[i]) and is_axis_aligned(angles[j]))
+    return {"total": len(pairs), "both_axis": both_axis, "diagonal_involved": len(pairs) - both_axis}
+
+
+def find_interaction_points(curves: list[tuple[complex, complex, complex]]) -> list[tuple[np.ndarray, frozenset[int]]]:
+    # 3本以上の合流検出用。端点同士の近接(接続)とストローク中間の交差の両方を検出する
+    n = len(curves)
+    points: list[tuple[np.ndarray, frozenset[int]]] = []
+
+    endpoints = [(np.array([s.real, s.imag]), np.array([e.real, e.imag])) for s, c, e in curves]
+    for i in range(n):
+        for j in range(i + 1, n):
+            for pi in endpoints[i]:
+                for pj in endpoints[j]:
+                    if np.linalg.norm(pi - pj) < JUNCTION_CONNECTION_THRESHOLD:
+                        points.append(((pi + pj) / 2, frozenset((i, j))))
+
+    for i, j, point in _find_curve_intersections(curves):
+        points.append((point, frozenset((i, j))))
+    return points
+
+
+def count_triple_junctions(curves: list[tuple[complex, complex, complex]]) -> int:
+    interactions = find_interaction_points(curves)
+    n = len(interactions)
+    if n == 0:
+        return 0
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if np.linalg.norm(interactions[i][0] - interactions[j][0]) < JUNCTION_CLUSTER_RADIUS:
+                union(i, j)
+
+    clusters: dict[int, set[int]] = {}
+    for idx, (_, strokes) in enumerate(interactions):
+        clusters.setdefault(find(idx), set()).update(strokes)
+
+    return sum(1 for strokes in clusters.values() if len(strokes) >= 3)
+
+
 def draw_curves(ax: plt.Axes, curves: list[tuple[complex, complex, complex]]) -> None:
     for start, control, end in curves:
         # SVGはy軸が下向きのため、view_kanji.pyと同様上向きに合わせて反転する
