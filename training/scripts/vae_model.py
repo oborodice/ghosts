@@ -16,7 +16,7 @@ LATENT_DIM = 48
 # 容量不足(train/valギャップが小さい代わりにval側のstrokes_mse・交差数が悪い)で、512では
 # 逆にtrain/valギャップが拡大し過学習寄りになったため、間に位置する256を採用した
 SLOT_DIM = 256  # スロットごとの内部表現の次元
-SLOT_ATTENTION_HEADS = 4  # 未検証(たたき台)
+SLOT_ATTENTION_HEADS = 4  # 1ヘッドあたりSLOT_DIM/4=64次元となり、一般的なTransformerでもよく使われる値のため妥当と判断し、sweepはせず据え置いている
 # weight sweepでは2→3で交差数・斜め関与・3本合流が改善したが、SLOT_DIMとの組み合わせで
 # 重複スロットが悪化する相互作用が見つかった(SLOT_DIM単体・layers単体ではほぼ悪化しないが、
 # 両方を同時に上げると重複が大きく悪化する)。重複スロットの改善を優先し、2に戻した

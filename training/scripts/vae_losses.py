@@ -14,6 +14,11 @@ CONNECTION_LENGTH_EPSILON = 1e-6  # 0除算回避(existence=0のpaddingスロッ
 NEARBY_LOSS_WEIGHT = 0.03  # 近傍点間隔一致損失に掛ける重み。weight sweepの結果、duplicate_pairs・spacing_error_meanが単調に改善しstrokes_mseの悪化もない範囲の上限で、0.1以降は両指標とも悪化に転じる(損失の生の値が大きく、重みを上げすぎると学習全体が不安定化するため)
 NEARBY_DISTANCE_SCALE = 15.0  # 重みの減衰スケール。実データの非接続ペア距離分布(5〜10%ileが13.66〜17.94)を踏まえ、目・日等の格子状部首の間隔付近だけに重みが乗るよう選んだ
 ANGLE_NATURALNESS_LOSS_WEIGHT = 1.0  # 角度の自然さ損失に掛ける重み。weight sweepの結果、strokes_mseの悪化を+11%程度に抑えつつ角度対数密度の改善が最大だった値(2.0以上ではコストが増える一方、密度改善はむしろ弱まった)
+CROSSING_GATE_LOW = 0.08  # 交点パラメータt, uがこの範囲内ならストローク内部での交差とみなす(下限)。端点付近の接続点を除外する
+CROSSING_GATE_HIGH = 0.92  # 同上(上限)
+CROSSING_GATE_SHARPNESS = 40.0  # _interior_gateのsigmoidの急峻さ(大きいほど矩形窓に近づく)。未検証(たたき台)
+CROSSING_DENOM_EPSILON = 1e-6  # 平行な弦同士でのゼロ除算回避
+CROSSING_LOSS_WEIGHT = 0.3  # weight sweepの結果、0.3〜0.5あたりで斜め関与の交差の改善が頭打ちになりそれ以降はコストだけ伸びるため、knee(境目)に近い値を採用した。本番同様のearly stopping・複数seedでも両seedで斜め関与の改善・strokes_mseの改善が一致した
 
 
 def stroke_endpoints(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -124,6 +129,69 @@ def _compute_nearby_spacing_loss(
     return (weight * (recon_dist - real_dist) ** 2).sum(dim=(1, 2)).mean()
 
 
+def _pairwise_intersection_params(
+    strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # 各ストロークを弦(始点->終点)とみなし、全ペア(i, j)の交点パラメータt(iの弦上の位置)・
+    # u(jの弦上の位置)をクラメルの公式(2元1次方程式)で解く。t, uはアフィン変換で不変
+    # (2次元クロス積の分子・分母に現れるdetが約分される)ため、標準化スケールの座標をそのまま使ってよい
+    start = strokes[..., 0:2]
+    end = stroke_endpoints(strokes, mean, std)
+    direction = end - start  # (B, slot_count, 2)
+
+    d1 = direction.unsqueeze(2)  # (B, slot_count, 1, 2) -- iの方向、jへブロードキャスト
+    d2 = direction.unsqueeze(1)  # (B, 1, slot_count, 2) -- jの方向、iへブロードキャスト
+    denom = d1[..., 0] * d2[..., 1] - d1[..., 1] * d2[..., 0]
+    # 平行な弦(denom≈0)はt, uが発散するが、_interior_gateで範囲外に押し出されるため実害はない
+    denom = torch.where(denom.abs() < CROSSING_DENOM_EPSILON, torch.full_like(denom, CROSSING_DENOM_EPSILON), denom)
+
+    diff = start.unsqueeze(1) - start.unsqueeze(2)  # p3 - p1, (B, slot_count(i), slot_count(j), 2)
+    t = (diff[..., 0] * d2[..., 1] - diff[..., 1] * d2[..., 0]) / denom
+    u = (diff[..., 0] * d1[..., 1] - diff[..., 1] * d1[..., 0]) / denom
+    return t, u
+
+
+def _interior_gate(t: torch.Tensor) -> torch.Tensor:
+    # t=CROSSING_GATE_LOW〜HIGHの範囲(ストローク内部)を、2つのsigmoidの積による
+    # なめらかな矩形窓で近似する(線分交差判定は本質的に微分不可能なため)
+    low = torch.sigmoid(CROSSING_GATE_SHARPNESS * (t - CROSSING_GATE_LOW))
+    high = torch.sigmoid(CROSSING_GATE_SHARPNESS * (CROSSING_GATE_HIGH - t))
+    return low * high
+
+
+def _crossing_pair_weights(
+    strokes: torch.Tensor, existence: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> torch.Tensor:
+    # 正解(strokes)側で実際に交差しているペア(才のような正当な交差)は損失の対象外にする。
+    # 交差の有無自体は不連続な事実であり勾配は不要なため、正解側の判定はハード閾値で行う。
+    # 判定基準を正解側のみにするのは、再構成側は学習途中で崩れている可能性があるため
+    with torch.no_grad():
+        t, u = _pairwise_intersection_params(strokes, mean, std)
+        interior = (t > CROSSING_GATE_LOW) & (t < CROSSING_GATE_HIGH)
+        interior &= (u > CROSSING_GATE_LOW) & (u < CROSSING_GATE_HIGH)
+        not_crossing = (~interior).float()
+
+    slot_count = existence.shape[1]
+    exist_pair = existence.unsqueeze(2) * existence.unsqueeze(1)
+    same_slot = torch.eye(slot_count, device=existence.device)
+    weights = exist_pair * (1.0 - same_slot.unsqueeze(0)) * not_crossing
+    return torch.triu(weights, diagonal=1)  # 上三角のみを使い、ペアの二重カウントを避ける
+
+
+def _compute_crossing_loss(
+    strokes: torch.Tensor,
+    strokes_recon: torch.Tensor,
+    existence: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+) -> torch.Tensor:
+    # 正解で交差していないペアについて、再構成側の交差の強さ(0〜1の連続値)にペナルティを与える
+    weights = _crossing_pair_weights(strokes, existence, mean, std)
+    t_recon, u_recon = _pairwise_intersection_params(strokes_recon, mean, std)
+    crossing_strength = _interior_gate(t_recon) * _interior_gate(u_recon)
+    return (weights * crossing_strength).sum(dim=(1, 2)).mean()
+
+
 class AngleGMM(NamedTuple):
     means: torch.Tensor  # (K, 2)
     precisions: torch.Tensor  # (K, 2, 2)、共分散行列の逆行列
@@ -213,6 +281,9 @@ def compute_loss(
         strokes, strokes_recon, existence, mean, std, angle_gmm
     )
 
+    # 正解で交差していないストロークペアが、再構成で交差してしまう(貫き)ことを抑制する
+    crossing_loss = _compute_crossing_loss(strokes, strokes_recon, existence, mean, std)
+
     return (
         strokes_loss
         + existence_loss
@@ -221,4 +292,5 @@ def compute_loss(
         + CONNECTION_LOSS_WEIGHT * connection_loss
         + NEARBY_LOSS_WEIGHT * nearby_spacing_loss
         + ANGLE_NATURALNESS_LOSS_WEIGHT * angle_naturalness_loss
+        + CROSSING_LOSS_WEIGHT * crossing_loss
     )
