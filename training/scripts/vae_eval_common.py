@@ -14,9 +14,12 @@ from vae_model import flatten_input, unflatten_output
 # existenceの確率(Sigmoid(existence_logits))をbool判定に変換する閾値。evaluate_vae.pyの正答率算出とも共有する
 EXISTENCE_THRESHOLD = 0.5
 
-# 生成時にzを実データへ引き寄せるカーネル幅(実データ同士の最近傍距離の中央値を目安に選んだ値)。
-# export_onnx.pyのエクスポート済みグラフにもこの値がそのまま焼き込まれる
-KERNEL_BANDWIDTH = 0.6
+# 生成時にzを実データへ引き寄せるカーネル幅。元は実データ同士の最近傍距離の中央値を目安に0.6としていたが、
+# それだと生成結果が特定の実在字とほぼ一致しやすかった。decoderをcompute_synthetic_grammar_loss(vae_losses.py)
+# で広いbandwidthでも崩れないよう学習し直した上でsweepし、ノベルティ(最近傍実データとの距離)・交差数・
+# 斜め関与交差のバランスが最も良かった1.5を採用した。export_onnx.pyのエクスポート済みグラフにもこの値が
+# そのまま焼き込まれる
+KERNEL_BANDWIDTH = 1.5
 
 
 class SplitData(NamedTuple):
