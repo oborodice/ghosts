@@ -6,6 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from vae_data import AngleGMMParams
+from vae_model import VAE, ModelShape, unflatten_output
 
 ENDPOINT_LOSS_WEIGHT = 1.0  # 終点座標のMSEに掛ける重み(strokes_lossと同程度のスケールになるよう設計してある)
 CONNECTION_LOSS_WEIGHT = 12.0  # 接続点一致損失に掛ける重み。weight sweepの結果、12は接続距離を約1割改善しつつstrokes_mse・重複スロット等への悪影響が候補中最小だった値(16・20はいずれも副作用がより大きく、12→16→20の単調な関係にはなっていない)
@@ -19,6 +20,15 @@ CROSSING_GATE_HIGH = 0.92  # 同上(上限)
 CROSSING_GATE_SHARPNESS = 40.0  # _interior_gateのsigmoidの急峻さ(大きいほど矩形窓に近づく)。未検証(たたき台)
 CROSSING_DENOM_EPSILON = 1e-6  # 平行な弦同士でのゼロ除算回避
 CROSSING_LOSS_WEIGHT = 0.3  # weight sweepの結果、0.3〜0.5あたりで斜め関与の交差の改善が頭打ちになりそれ以降はコストだけ伸びるため、knee(境目)に近い値を採用した。本番同様のearly stopping・複数seedでも両seedで斜め関与の改善・strokes_mseの改善が一致した
+
+# 実在漢字への反発力(幽霊文字の生成モデル(モデル設計・フェーズ6).md「検討: 学習時に対処する案」参照)。
+# 複数の実在字のmuを混ぜた合成z(学習が一度も見ない領域)をdecodeし、交差抑制・角度自然さの2つの
+# 「文法」損失だけを適用する。正解データを必要としない絶対評価であり、対応する正解ペアが存在しないため
+# 接続点一致損失・近傍点間隔一致損失(いずれも正解データの実測値が目標値になる)は適用できない
+SYNTHETIC_BANDWIDTH = 0.6  # weight sweepの結果、0.6が最良だった。1.0〜2.0はバッチ内mu(数十件、疎)を対象に混ぜすぎになり、交差・斜め関与の改善幅は0.6よりやや大きいものの3本以上合流とstrokes_mseが悪化する非単調な副作用が出たため、副作用が無い、または最小の0.6を採用した
+SYNTHETIC_CROSSING_WEIGHT = 0.5  # weight sweepの結果、0.3・0.5はベースラインに対し全指標で悪化ゼロだったが、0.5の方が交差抑制効果が強くstrokes_mseの悪化も小さいため採用した(1.0はさらに強力だが合流とstrokes_mseの悪化が大きく、悪化ゼロの条件を満たさなかった)
+SYNTHETIC_ANGLE_WEIGHT = 1.0  # weight sweepの結果、0.0・0.3・1.0のいずれもベースラインに対し全指標で悪化ゼロで、1.0が角度対数密度の改善が最も大きかったため採用した(ANGLE_NATURALNESS_LOSS_WEIGHTと同じ値)
+SYNTHETIC_EXISTENCE_THRESHOLD = 0.5  # 合成データの予測existenceをマスク化する閾値。vae_eval_common.EXISTENCE_THRESHOLDと同じ考え方
 
 
 def stroke_endpoints(strokes: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
@@ -159,6 +169,16 @@ def _interior_gate(t: torch.Tensor) -> torch.Tensor:
     return low * high
 
 
+def _off_diagonal_exist_pairs(existence: torch.Tensor) -> torch.Tensor:
+    # 存在するスロット同士の全ペア(自分自身を除く)を1、それ以外を0とする上三角マスク。
+    # 上三角のみを使うのはペアの二重カウントを避けるため。_crossing_pair_weights・
+    # _compute_synthetic_crossing_lossで共通して使う
+    slot_count = existence.shape[1]
+    exist_pair = existence.unsqueeze(2) * existence.unsqueeze(1)
+    same_slot = torch.eye(slot_count, device=existence.device)
+    return torch.triu(exist_pair * (1.0 - same_slot.unsqueeze(0)), diagonal=1)
+
+
 def _crossing_pair_weights(
     strokes: torch.Tensor, existence: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
 ) -> torch.Tensor:
@@ -171,11 +191,17 @@ def _crossing_pair_weights(
         interior &= (u > CROSSING_GATE_LOW) & (u < CROSSING_GATE_HIGH)
         not_crossing = (~interior).float()
 
-    slot_count = existence.shape[1]
-    exist_pair = existence.unsqueeze(2) * existence.unsqueeze(1)
-    same_slot = torch.eye(slot_count, device=existence.device)
-    weights = exist_pair * (1.0 - same_slot.unsqueeze(0)) * not_crossing
-    return torch.triu(weights, diagonal=1)  # 上三角のみを使い、ペアの二重カウントを避ける
+    return _off_diagonal_exist_pairs(existence) * not_crossing
+
+
+def _weighted_crossing_penalty(
+    strokes_recon: torch.Tensor, weights: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> torch.Tensor:
+    # 再構成側の交差の強さ(0〜1の連続値)を求め、ペアごとの重みを掛けて損失にする。
+    # _compute_crossing_loss・_compute_synthetic_crossing_lossで共通して使う(weightsの作り方だけが異なる)
+    t, u = _pairwise_intersection_params(strokes_recon, mean, std)
+    crossing_strength = _interior_gate(t) * _interior_gate(u)
+    return (weights * crossing_strength).sum(dim=(1, 2)).mean()
 
 
 def _compute_crossing_loss(
@@ -185,11 +211,9 @@ def _compute_crossing_loss(
     mean: torch.Tensor,
     std: torch.Tensor,
 ) -> torch.Tensor:
-    # 正解で交差していないペアについて、再構成側の交差の強さ(0〜1の連続値)にペナルティを与える
+    # 正解で交差していないペアについて、再構成側の交差の強さにペナルティを与える
     weights = _crossing_pair_weights(strokes, existence, mean, std)
-    t_recon, u_recon = _pairwise_intersection_params(strokes_recon, mean, std)
-    crossing_strength = _interior_gate(t_recon) * _interior_gate(u_recon)
-    return (weights * crossing_strength).sum(dim=(1, 2)).mean()
+    return _weighted_crossing_penalty(strokes_recon, weights, mean, std)
 
 
 class AngleGMM(NamedTuple):
@@ -237,6 +261,62 @@ def _compute_angle_naturalness_loss(
     recon_log_density = _angle_log_density(recon_angle, angle_gmm)
     penalty = torch.clamp(true_log_density - recon_log_density, min=0.0)
     return (penalty * existence).sum(dim=1).mean()
+
+
+def _attract_batch(z_raw: torch.Tensor, mu_batch: torch.Tensor, bandwidth: float) -> torch.Tensor:
+    # vae_eval_common.attract_to_latent_priorと同じNadaraya-Watson推定量だが、decoderへ勾配を
+    # 通す必要があるため@torch.no_gradにはしない(mu_batch側は呼び出し元で事前にdetachする)
+    dist_sq = torch.cdist(z_raw, mu_batch) ** 2
+    weights = torch.softmax(-dist_sq / (2 * bandwidth * bandwidth), dim=1)
+    return weights @ mu_batch
+
+
+def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
+    # 合成データには正解のexistenceが存在しないため、モデル自身の予測値をマスクとして使う。
+    # マスクは離散的な採用判定であり勾配は不要なため、_crossing_pair_weightsのnot_crossingと同じくdetachする
+    with torch.no_grad():
+        return (torch.sigmoid(existence_logits) > SYNTHETIC_EXISTENCE_THRESHOLD).float()
+
+
+def _compute_synthetic_crossing_loss(
+    strokes_recon: torch.Tensor, existence: torch.Tensor, mean: torch.Tensor, std: torch.Tensor
+) -> torch.Tensor:
+    # 正解データがなく「意図した交差」を除外できないため、存在するペア全てが交差しないのが正しいという
+    # 前提を置く(実データでも交差は少数派のため、多くの場合で妥当な近似になる)
+    weights = _off_diagonal_exist_pairs(existence)
+    return _weighted_crossing_penalty(strokes_recon, weights, mean, std)
+
+
+def _compute_synthetic_angle_loss(
+    strokes_recon: torch.Tensor, existence: torch.Tensor, mean: torch.Tensor, std: torch.Tensor, angle_gmm: AngleGMM
+) -> torch.Tensor:
+    # 比較対象となる正解の角度が存在しないため、_compute_angle_naturalness_lossのような相対評価ではなく、
+    # GMMの対数密度をそのまま最大化する絶対評価を行う(合成データは常に典型的な角度に近づけるべきという前提)
+    recon_angle = strokes_recon[..., 2] * std[2] + mean[2]
+    recon_log_density = _angle_log_density(recon_angle, angle_gmm)
+    # 対数密度は大きいほど良いため、損失としては符号を反転する
+    return (-recon_log_density * existence).sum(dim=1).mean()
+
+
+def compute_synthetic_grammar_loss(
+    model: VAE,
+    mu: torch.Tensor,
+    shape: ModelShape,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    angle_gmm: AngleGMM,
+) -> torch.Tensor:
+    # バッチ内の実データのmu(引き寄せ先の代わり、勾配を通さないようdetach)へ、ランダムなz_rawを
+    # 引き寄せて複数の実在字を混ぜた合成zを作り、decodeした出力に文法(交差抑制・角度自然さ)損失を課す
+    z_raw = torch.randn_like(mu)
+    z_synthetic = _attract_batch(z_raw, mu.detach(), SYNTHETIC_BANDWIDTH)
+    recon_synthetic = model.decode(z_synthetic)
+    strokes_recon_synthetic, existence_logits_synthetic = unflatten_output(recon_synthetic, shape)
+    existence_synthetic = _synthetic_existence_mask(existence_logits_synthetic)
+
+    crossing_loss = _compute_synthetic_crossing_loss(strokes_recon_synthetic, existence_synthetic, mean, std)
+    angle_loss = _compute_synthetic_angle_loss(strokes_recon_synthetic, existence_synthetic, mean, std, angle_gmm)
+    return SYNTHETIC_CROSSING_WEIGHT * crossing_loss + SYNTHETIC_ANGLE_WEIGHT * angle_loss
 
 
 def compute_loss(

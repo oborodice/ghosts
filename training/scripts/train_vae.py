@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from vae_data import SEED, prepare_datasets
-from vae_losses import AngleGMM, build_angle_gmm, compute_loss
+from vae_losses import AngleGMM, build_angle_gmm, compute_loss, compute_synthetic_grammar_loss
 from vae_model import (
     CHECKPOINT_PATH,
     HIDDEN_DIMS,
@@ -76,6 +76,7 @@ def _run_epoch(
                 mean,
                 std,
             )
+            loss = loss + compute_synthetic_grammar_loss(model, mu, shape, mean, std, angle_gmm)
 
             if optimizer is not None:
                 optimizer.zero_grad()
