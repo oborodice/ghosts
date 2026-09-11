@@ -39,6 +39,10 @@ $ uv run scripts/evaluate_vae.py
 # 接続点周辺は文字全体の表示では崩れが見えづらいため、個別にズームインした図も表示する
 $ uv run scripts/visualize_reconstruction.py
 
+# 本物(実データ)/偽物(生成結果)を判別する小さい分類器を学習させ、その正答率で生成結果が統計的に
+# どれだけ実在字らしいかを診断する(人間が名指しした軸に限らず、未知の差も拾い上げられる)
+$ uv run scripts/evaluate_generation_realism.py
+
 # 事前分布N(0,I)からサンプリングし、実データへカーネル重み付けで引き寄せた後のzのdecode結果を目視確認する
 $ uv run scripts/visualize_prior_samples.py
 
