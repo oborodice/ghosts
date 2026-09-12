@@ -170,9 +170,8 @@ def _compute_deviation(stats: _PopulationStats, targets: _Targets, target_count:
     # 3本以上合流は目標値(平均)がゼロに近く、同じ相対誤差の定義だと少しの絶対誤差でも比率が
     # 発散してしまうため、代わりに実データの標準偏差を基準にした乖離(z-score的な発想)を使う。
     # 交差数・3本以上合流を追加したのは、ストローク長の微調整がこの2軸を悪化させる副作用を持つと
-    # 判明したため(フェーズ8「交差の斜め関与比率の歪みの是正」参照)。ストローク数・長さだけを見て
-    # 早期終了すると、この副作用に気づかないまま「ストローク数・長さだけは良い」チェックポイントを
-    # 採用してしまう
+    # 判明したため。ストローク数・長さだけを見て早期終了すると、この副作用に気づかないまま
+    # 「ストローク数・長さだけは良い」チェックポイントを採用してしまう
     count_deviation = _relative_deviation(stats.stroke_count_mean, target_count)
     length_deviation = _relative_deviation(stats.length_mean, target_length)
     crossings_deviation = _zscore_deviation(stats.crossings_mean, targets.crossings_mean, targets.crossings_std)

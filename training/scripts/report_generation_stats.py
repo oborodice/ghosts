@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-# 生成結果の各軸(ストローク数・長さ・曲がり具合・面積・軸方向率・孤立率・交差・3本以上合流)を、実データと
-# 揃えた方法で数値化する診断ツール。VAEの学習・推論(生成)には一切組み込まれない、独立した事後診断用の
-# スクリプト。フェーズ7・8を通してこの内容を都度スクラッチで書き直していたため、繰り返し使う定型の
-# レポートとして1本化した
+# 生成結果の各軸(ストローク数・長さ・曲がり具合・面積・軸方向率・孤立率・交差・3本以上合流・
+# 同方向ストロークの束)を、実データと揃えた方法で数値化する診断ツール。VAEの学習・推論(生成)には
+# 一切組み込まれない、独立した事後診断用のスクリプト。フェーズ7・8を通してこの内容を都度スクラッチで
+# 書き直していたため、繰り返し使う定型のレポートとして1本化した
 import numpy as np
 import torch
 
 from vae_checkpoint import load_checkpoint
 from vae_eval_common import (
+    SEGMENTS_PER_CURVE,
     attract_to_latent_prior,
+    bezier_polyline,
     crossings_and_triple_junctions,
     encode,
     existence_mask_from_logits,
+    find_crossing_pairs,
     is_axis_aligned,
     load_train_data,
     stroke_endpoints_array,
+    strokes_to_curves,
 )
 from vae_model import select_device, unflatten_output
 from vae_synthetic_losses import masked_mean_std
 
 SAMPLE_COUNT = 2000
 CONNECTION_THRESHOLD = 4.0  # extract_stroke_features.CONNECTION_THRESHOLDと同じ
+BUNDLED_ANGLE_THRESHOLD_DEG = 15.0  # vae_eval_common.AXIS_TOLERANCE_DEGと同じ考え方(同方向とみなす角度差)
 
 
 def _bbox_area(strokes: np.ndarray, existence: np.ndarray) -> np.ndarray:
@@ -56,6 +61,52 @@ def _isolated_stroke_rate(strokes: np.ndarray, existence: np.ndarray) -> float:
     return 100 * total_isolated / total_strokes if total_strokes else float("nan")
 
 
+def _circular_angle_diff_deg(a: float, b: float) -> float:
+    # 向きの違いだけを見る(180度反対向きは同じ直線とみなす)ため、角度をmod 180で比較する
+    diff = np.degrees(a - b) % 180
+    return np.minimum(diff, 180 - diff)
+
+
+def _is_bundled_pair(polyline_a: np.ndarray, polyline_b: np.ndarray, angle_a: float, angle_b: float) -> bool:
+    # 端点同士が近い(=接続)ペアは対象外。それ以外で、同方向(角度差15度未満)かつ線分同士が
+    # CONNECTION_THRESHOLD未満まで近接していれば「束」とみなす。交差しているかどうかの判定は
+    # 呼び出し側(ペアごとに1回で済み、ここで毎回計算する必要がないため)で行う
+    endpoints_a = np.array([polyline_a[0], polyline_a[-1]])
+    endpoints_b = np.array([polyline_b[0], polyline_b[-1]])
+    endpoint_dist = np.linalg.norm(endpoints_a[:, None, :] - endpoints_b[None, :, :], axis=-1).min()
+    if endpoint_dist < CONNECTION_THRESHOLD:
+        return False
+    if _circular_angle_diff_deg(angle_a, angle_b) >= BUNDLED_ANGLE_THRESHOLD_DEG:
+        return False
+    diff = polyline_a[:, None, :] - polyline_b[None, :, :]
+    min_dist = np.sqrt((diff**2).sum(axis=-1)).min()
+    return min_dist < CONNECTION_THRESHOLD
+
+
+def _bundled_stroke_rate(strokes: np.ndarray, existence: np.ndarray) -> float:
+    # 交差も端点接続もしていないのに同方向・近接なペア(_is_bundled_pair参照)を「束」とみなし、
+    # 字あたりの平均個数を返す。生成結果で同方向のストロークが近接して並走する現象を数値化する
+    total_bundled = 0
+    n = strokes.shape[0]
+    for i in range(n):
+        mask = existence[i]
+        active = np.where(mask)[0]
+        if len(active) < 2:
+            continue
+        curves = strokes_to_curves(strokes[i], mask)
+        crossing_pairs = set(find_crossing_pairs(curves))
+        polylines = [bezier_polyline(s, c, e, SEGMENTS_PER_CURVE) for s, c, e in curves]
+        angles = strokes[i, active, 2]
+        m = len(active)
+        for a in range(m):
+            for b in range(a + 1, m):
+                if (a, b) in crossing_pairs or (b, a) in crossing_pairs:
+                    continue
+                if _is_bundled_pair(polylines[a], polylines[b], angles[a], angles[b]):
+                    total_bundled += 1
+    return total_bundled / n
+
+
 def _report(label: str, strokes: np.ndarray, existence: np.ndarray) -> None:
     existence_bool = existence.astype(bool)
     stroke_count = existence_bool.sum(axis=1)
@@ -78,6 +129,7 @@ def _report(label: str, strokes: np.ndarray, existence: np.ndarray) -> None:
     print(f"isolated_stroke_rate = {_isolated_stroke_rate(strokes, existence_bool):.1f}%")
     print(f"crossings mean = {crossings.mean():.3f} (diagonal-involved = {diag.mean():.3f})")
     print(f"triple_junctions mean = {triple.mean():.3f}")
+    print(f"bundled_stroke_pairs mean = {_bundled_stroke_rate(strokes, existence_bool):.4f}")
 
 
 def main() -> None:
