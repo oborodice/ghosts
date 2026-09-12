@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from vae_checkpoint import save_checkpoint
 from vae_data import SEED, prepare_datasets
 from vae_losses import AngleGMM, build_angle_gmm, compute_loss, compute_synthetic_grammar_loss
 from vae_model import (
@@ -87,26 +87,6 @@ def _run_epoch(
     return total_loss / len(loader.dataset)
 
 
-def _save_checkpoint(model: VAE, shape: ModelShape, mean: np.ndarray, std: np.ndarray) -> None:
-    # 生成(推論)に必要な情報のみを保存する(学習再開用のoptimizer状態・epoch数などは含まない)
-    CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "hidden_dims": HIDDEN_DIMS,
-            "latent_dim": LATENT_DIM,
-            # torch.loadのweights_only=True(デフォルト)はNamedTupleサブクラスを許可しないため、
-            # hidden_dimsと同じくプレーンなtupleとして保存する
-            "slot_attention_config": tuple(SLOT_ATTENTION_CONFIG),
-            "slot_count": shape.slot_count,
-            "feature_dim": shape.feature_dim,
-            "mean": torch.tensor(mean, dtype=torch.float32),
-            "std": torch.tensor(std, dtype=torch.float32),
-        },
-        CHECKPOINT_PATH,
-    )
-
-
 def main() -> None:
     torch.manual_seed(SEED)
     device = select_device()
@@ -144,7 +124,9 @@ def main() -> None:
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_without_improvement = 0
-            _save_checkpoint(model, datasets.shape, datasets.mean, datasets.std)
+            save_checkpoint(
+                model, datasets.shape, HIDDEN_DIMS, LATENT_DIM, SLOT_ATTENTION_CONFIG, mean_tensor, std_tensor
+            )
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= PATIENCE:
