@@ -14,7 +14,7 @@ from vae_eval_common import (
     load_validation_data,
     strokes_to_curves,
 )
-from vae_losses import _connection_pair_weights, _stroke_points, stroke_endpoints
+from vae_losses import connection_pair_weights, stroke_endpoints, stroke_points
 from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_output
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
@@ -221,10 +221,10 @@ def _print_connection_distance(
 ) -> None:
     print("== 8. Connection distance check ==")
     strokes, _, strokes_recon, _ = result
-    # _connection_pair_weights(正解側の長さから決まる重み)は、compute_lossが短いセグメント
+    # connection_pair_weights(正解側の長さから決まる重み)は、compute_lossが短いセグメント
     # (ハネ由来)に高い重みを掛けるのと同じ基準。weight>1のペアだけを取り出せば短いセグメントに絞り込める
-    weights = _connection_pair_weights(strokes, mean, std)
-    points_recon_real = _stroke_points(strokes_recon, mean, std) * std[0:2] + mean[0:2]
+    weights = connection_pair_weights(strokes, mean, std)
+    points_recon_real = stroke_points(strokes_recon, mean, std) * std[0:2] + mean[0:2]
     diff = points_recon_real.unsqueeze(2) - points_recon_real.unsqueeze(1)
     dist_real = diff.norm(dim=-1)
 

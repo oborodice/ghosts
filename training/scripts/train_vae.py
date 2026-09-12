@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 
 from vae_checkpoint import save_checkpoint
 from vae_data import SEED, prepare_datasets
-from vae_losses import AngleGMM, build_angle_gmm, compute_loss, compute_synthetic_grammar_loss
+from vae_losses import AngleGMM, build_angle_gmm, compute_loss
 from vae_model import (
     CHECKPOINT_PATH,
     HIDDEN_DIMS,
@@ -21,6 +21,7 @@ from vae_model import (
     select_device,
     unflatten_output,
 )
+from vae_synthetic_losses import compute_synthetic_grammar_loss
 
 SLOT_ATTENTION_CONFIG = SlotAttentionConfig(
     SLOT_DIM, SLOT_ATTENTION_HEADS, SLOT_ATTENTION_LAYERS, SLOT_ATTENTION_FFN_DIM

@@ -7,14 +7,9 @@ from torch.utils.data import DataLoader
 from vae_checkpoint import load_checkpoint, save_checkpoint
 from vae_data import SEED, prepare_datasets
 from vae_eval_common import attract_to_latent_prior, existence_mask_from_logits
-from vae_losses import (
-    AngleGMM,
-    build_angle_gmm,
-    compute_finetune_stroke_count_loss,
-    compute_loss,
-    compute_synthetic_grammar_loss,
-)
+from vae_losses import AngleGMM, build_angle_gmm, compute_loss
 from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_output
+from vae_synthetic_losses import compute_finetune_stroke_count_loss, compute_synthetic_grammar_loss
 
 BATCH_SIZE = 64
 VAE_LR = 1e-4  # 収束済みチェックポイントの微調整のため、train_vae.pyの1e-3より小さくする
