@@ -9,14 +9,12 @@ import torch
 from vae_checkpoint import load_checkpoint
 from vae_eval_common import (
     attract_to_latent_prior,
-    classify_crossings,
-    count_triple_junctions,
+    crossings_and_triple_junctions,
     encode,
     existence_mask_from_logits,
     is_axis_aligned,
     load_train_data,
     stroke_endpoints_array,
-    strokes_to_curves,
 )
 from vae_model import select_device, unflatten_output
 from vae_synthetic_losses import masked_mean_std
@@ -58,19 +56,6 @@ def _isolated_stroke_rate(strokes: np.ndarray, existence: np.ndarray) -> float:
     return 100 * total_isolated / total_strokes if total_strokes else float("nan")
 
 
-def _crossings_and_triple_junctions(strokes: np.ndarray, existence: np.ndarray) -> tuple[float, float, float]:
-    n = strokes.shape[0]
-    total = diag = triple = 0
-    for i in range(n):
-        mask = existence[i]
-        curves = strokes_to_curves(strokes[i], mask)
-        cls = classify_crossings(curves, strokes[i][mask, 2])
-        total += cls["total"]
-        diag += cls["diagonal_involved"]
-        triple += count_triple_junctions(curves)
-    return total / n, diag / n, triple / n
-
-
 def _report(label: str, strokes: np.ndarray, existence: np.ndarray) -> None:
     existence_bool = existence.astype(bool)
     stroke_count = existence_bool.sum(axis=1)
@@ -82,7 +67,7 @@ def _report(label: str, strokes: np.ndarray, existence: np.ndarray) -> None:
         torch.from_numpy(curviness), torch.from_numpy(existence_bool.astype(np.float32))
     )
     valid_char = length_count >= 2  # ストローク数1以下の字は標準偏差が定義できない(常に0になる)ため除外する
-    crossings, diag, triple = _crossings_and_triple_junctions(strokes, existence_bool)
+    crossings, diag, triple = crossings_and_triple_junctions(strokes, existence_bool)
 
     print(f"--- {label} (n={len(strokes)}) ---")
     print(f"stroke_count mean(std) = {stroke_count.mean():.2f} ({stroke_count.std():.2f})")
@@ -91,8 +76,8 @@ def _report(label: str, strokes: np.ndarray, existence: np.ndarray) -> None:
     print(f"bbox_area mean = {_bbox_area(strokes, existence_bool).mean():.1f}")
     print(f"axis_aligned_rate = {100 * np.mean([is_axis_aligned(a) for a in strokes[..., 2][existence_bool]]):.1f}%")
     print(f"isolated_stroke_rate = {_isolated_stroke_rate(strokes, existence_bool):.1f}%")
-    print(f"crossings mean = {crossings:.3f} (diagonal-involved = {diag:.3f})")
-    print(f"triple_junctions mean = {triple:.3f}")
+    print(f"crossings mean = {crossings.mean():.3f} (diagonal-involved = {diag.mean():.3f})")
+    print(f"triple_junctions mean = {triple.mean():.3f}")
 
 
 def main() -> None:

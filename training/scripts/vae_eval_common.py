@@ -229,6 +229,25 @@ def count_triple_junctions(curves: list[tuple[complex, complex, complex]]) -> in
     return sum(1 for strokes in clusters.values() if len(strokes) >= 3)
 
 
+def crossings_and_triple_junctions(strokes: np.ndarray, existence: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # 複数字分の(交差数, うち斜め関与, 3本以上合流)を、字ごとの値の配列として返す。平均だけでなく
+    # 標準偏差も必要な呼び出し元(finetune_synthetic_stats.py、目標値がゼロに近く相対誤差が発散するため
+    # 標準偏差基準の正規化が必要)がいるため、平均化はせず生の配列のまま返す。
+    # report_generation_stats.py・finetune_synthetic_stats.pyの早期終了判定で共有するヘルパー
+    n = strokes.shape[0]
+    total = np.zeros(n)
+    diag = np.zeros(n)
+    triple = np.zeros(n)
+    for i in range(n):
+        mask = existence[i].astype(bool)
+        curves = strokes_to_curves(strokes[i], mask)
+        cls = classify_crossings(curves, strokes[i][mask, 2])
+        total[i] = cls["total"]
+        diag[i] = cls["diagonal_involved"]
+        triple[i] = count_triple_junctions(curves)
+    return total, diag, triple
+
+
 def draw_curves(ax: plt.Axes, curves: list[tuple[complex, complex, complex]]) -> None:
     for start, control, end in curves:
         # SVGはy軸が下向きのため、view_kanji.pyと同様上向きに合わせて反転する
