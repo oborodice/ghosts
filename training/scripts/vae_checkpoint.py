@@ -46,7 +46,7 @@ def save_checkpoint(
     # 生成(推論)に必要な情報のみを保存する(学習再開用のoptimizer状態・epoch数などは含まない)。
     # hidden_dims・latent_dimはvae_model側の現在のグローバル定数ではなく、呼び出し元(モデルの実際の
     # 構築元)から明示的に受け取る。読み込んだチェックポイントをそのまま再保存するケース
-    # (finetune_stroke_count.py)で、モデル構築時と異なるハイパーパラメータへ変わらないようにするため
+    # (finetune_synthetic_stats.py)で、モデル構築時と異なるハイパーパラメータへ変わらないようにするため
     CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {

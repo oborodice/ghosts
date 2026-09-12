@@ -12,8 +12,9 @@ SYNTHETIC_BANDWIDTH = 0.6  # weight sweepの結果、0.6が最良だった。1.0
 SYNTHETIC_CROSSING_WEIGHT = 0.5  # weight sweepの結果、0.3・0.5はベースラインに対し全指標で悪化ゼロだったが、0.5の方が交差抑制効果が強くstrokes_mseの悪化も小さいため採用した(1.0はさらに強力だが合流とstrokes_mseの悪化が大きく、悪化ゼロの条件を満たさなかった)
 SYNTHETIC_ANGLE_WEIGHT = 0.0  # 角度損失は無効化した。対数密度をそのまま最大化する設計のため、重みを上げるほど生成結果の角度が最頻値(横画)に偏り、実データの角度分布(斜めが最多)から大きく外れる副作用が確認された。SYNTHETIC_CROSSING_WEIGHT単体でも交差数・3本以上合流はベースラインを下回っており、角度損失なしでも文法面の改善は十分に得られている。分布の形を保つ設計に作り直せない限り再度有効化しない
 SYNTHETIC_EXISTENCE_THRESHOLD = 0.5  # 合成データの予測existenceをマスク化する閾値。vae_eval_common.EXISTENCE_THRESHOLDと同じ考え方
+MASKED_STD_EPS = 1e-6  # masked_mean_stdの標準偏差計算で、平方根が0付近で微分不能になるのを避けるための微小値
 
-# 2段階目の微調整(finetune_stroke_count.py)専用のストローク数損失。生成結果は実データよりストローク数が
+# 2段階目の微調整(finetune_synthetic_stats.py)専用のストローク数損失。生成結果は実データよりストローク数が
 # 少なく(平均10.9画 vs 14.6画)多様性も乏しい(std2.4 vs 5.1)偏りがあり、GANによる検証でこの軸が改善対象
 # として意味のあるものだと裏付け済み。この損失は潜在空間が「近い字ほど似た性質を持つ」という構造に整理
 # されて初めて意味のある目標値になり、scratchからの学習序盤ではこの前提が満たされず効果が弱いため、
@@ -28,6 +29,20 @@ FINETUNE_SYNTHETIC_BANDWIDTH = 1.5  # zの引き寄せに使う帯域。SYNTHETI
 FINETUNE_TARGET_BANDWIDTH = 0.1  # 目標ストローク数を選ぶための重みの帯域。FINETUNE_SYNTHETIC_BANDWIDTHと
 # 同じ(1.5)にすると複数の実在字の加重平均で目標が平滑化され過ぎ、平均・標準偏差ともむしろ悪化することを
 # 確認済みのため、最近傍1〜2字に近い値を目標にできるよう分離したまま維持する
+
+# 2段階目の微調整専用のストローク長損失。生成結果は実データよりストロークが短く(平均20.3 vs 33.0)、
+# 長さのばらつきも乏しい(std8.7 vs 16.9)偏りがあり、分類器診断でこの軸が正答率のほとんどを説明する
+# 主要因だと判明済み。ストローク数と違い、目標値は
+# 「実データ全体で固定の平均・標準偏差」という位置に依存しない値のため、この損失自体は交差抑制と同じ
+# 普遍的なルールとして1段階目のscratch学習に組み込めるはずだった。しかし実際にはバッチ全体の統計を
+# 目標に合わせるこの設計に、目標付近で自然に釣り合う固定点が無く、重みの大小に関わらず時間とともに
+# 目標を追い越して高止まりすることを確認済み(ストローク数の集計統計版が繰り返しドリフトしたのと同じ
+# 構造)。そのため、損失の形はそのまま(個別サンプル目標ではなくバッチ全体の統計マッチング)に、適用の
+# 仕方だけをストローク数と同じ「収束済みチェックポイントへの2段階目微調整+目標乖離ベースのearly stopping」
+# に変更して使う
+FINETUNE_LENGTH_WEIGHT = 0.5  # weight sweepの結果、1.0は数百ステップで目標を追い越すのに対し、0.5は
+# 目標付近を通過するまでの時間が長く、early stoppingで捉えやすいため採用した(0.3はさらに緩やかだが、
+# 4000ステップ時点でまだ目標に届いておらず収束が遅すぎた)
 
 
 def _kernel_weights(z_raw: torch.Tensor, mu_batch: torch.Tensor, bandwidth: float) -> torch.Tensor:
@@ -49,6 +64,33 @@ def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
     # 同じくdetachする
     with torch.no_grad():
         return (torch.sigmoid(existence_logits) > SYNTHETIC_EXISTENCE_THRESHOLD).float()
+
+
+def _decode_synthetic_batch(
+    model: VAE, mu: torch.Tensor, shape: ModelShape
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # バッチ内の実データのmu(引き寄せ先の代わり、勾配を通さないようdetach)へ、ランダムなz_rawを
+    # 引き寄せて複数の実在字を混ぜた合成zを作りdecodeする。compute_synthetic_grammar_loss・
+    # compute_finetune_length_lossの両方から使う共有ヘルパー(いずれも「位置に依存しない一律のルール」
+    # という同じ性質の損失で、z_synthetic自体の作り方も同じでよいため)
+    z_raw = torch.randn_like(mu)
+    z_synthetic = _attract_batch(z_raw, mu.detach(), SYNTHETIC_BANDWIDTH)
+    recon_synthetic = model.decode(z_synthetic)
+    strokes_recon_synthetic, existence_logits_synthetic = unflatten_output(recon_synthetic, shape)
+    existence_synthetic = _synthetic_existence_mask(existence_logits_synthetic)
+    return strokes_recon_synthetic, existence_synthetic
+
+
+def masked_mean_std(values: torch.Tensor, mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # マスクされた要素だけを対象に、行(サンプルまたは字)ごとの平均・標準偏差・有効要素数を求める。
+    # finetune_synthetic_stats.pyでの目標値(実データ全体)算出と、_length_moment_matching_lossの
+    # 両方から使う共有ヘルパー
+    count = mask.sum(dim=1)
+    safe_count = count.clamp(min=1)
+    mean = (values * mask).sum(dim=1) / safe_count
+    var = (((values - mean.unsqueeze(1)) ** 2) * mask).sum(dim=1) / safe_count
+    std = torch.sqrt(var + MASKED_STD_EPS)
+    return mean, std, count
 
 
 def _compute_synthetic_crossing_loss(
@@ -80,13 +122,8 @@ def compute_synthetic_grammar_loss(
     std: torch.Tensor,
     angle_gmm: AngleGMM,
 ) -> torch.Tensor:
-    # バッチ内の実データのmu(引き寄せ先の代わり、勾配を通さないようdetach)へ、ランダムなz_rawを
-    # 引き寄せて複数の実在字を混ぜた合成zを作り、decodeした出力に文法(交差抑制・角度自然さ)損失を課す
-    z_raw = torch.randn_like(mu)
-    z_synthetic = _attract_batch(z_raw, mu.detach(), SYNTHETIC_BANDWIDTH)
-    recon_synthetic = model.decode(z_synthetic)
-    strokes_recon_synthetic, existence_logits_synthetic = unflatten_output(recon_synthetic, shape)
-    existence_synthetic = _synthetic_existence_mask(existence_logits_synthetic)
+    # decodeした出力に文法(交差抑制・角度自然さ)損失を課す
+    strokes_recon_synthetic, existence_synthetic = _decode_synthetic_batch(model, mu, shape)
 
     crossing_loss = _compute_synthetic_crossing_loss(strokes_recon_synthetic, existence_synthetic, mean, std)
     angle_loss = _compute_synthetic_angle_loss(strokes_recon_synthetic, existence_synthetic, mean, std, angle_gmm)
@@ -120,4 +157,42 @@ def compute_finetune_stroke_count_loss(
     target_weights = _kernel_weights(z_raw, target_pool_mu.detach(), FINETUNE_TARGET_BANDWIDTH)
     return FINETUNE_STROKE_COUNT_WEIGHT * _per_sample_stroke_count_loss(
         existence_logits_synthetic, target_weights, target_pool_count
+    )
+
+
+def _length_moment_matching_loss(
+    strokes_recon: torch.Tensor,
+    existence: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    target_length_mean: torch.Tensor,
+    target_length_std: torch.Tensor,
+) -> torch.Tensor:
+    # 各合成サンプルの長さの平均・標準偏差を求め、バッチ全体で平均したものを実データ全体の固定値に
+    # 近づける。ストローク数の個別サンプル目標と異なり、目標値がサンプルの位置(どの実在字群を混ぜたか)に
+    # 依存しない一律の値であるため、対応関係がバッチ内のどのサンプルにも等しく当てはまる
+    length = strokes_recon[..., 3] * std[3] + mean[3]
+    per_sample_mean, per_sample_std, count = masked_mean_std(length, existence)
+    valid = count >= 2  # 標準偏差は2点以上ないと定義できない
+    if valid.sum() == 0:
+        return torch.zeros((), device=strokes_recon.device)
+    batch_mean = per_sample_mean[valid].mean()
+    batch_std = per_sample_std[valid].mean()
+    return (batch_mean - target_length_mean) ** 2 + (batch_std - target_length_std) ** 2
+
+
+def compute_finetune_length_loss(
+    model: VAE,
+    mu: torch.Tensor,
+    shape: ModelShape,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    target_length_mean: torch.Tensor,
+    target_length_std: torch.Tensor,
+) -> torch.Tensor:
+    # 目標値がバッチ内のどのサンプルにも等しく当てはまる一律の値のため、ストローク数と違いzの引き寄せ先を
+    # 実データ全件にする必要はなく、compute_synthetic_grammar_lossと同じ構築方法(_decode_synthetic_batch)を使う
+    strokes_recon_synthetic, existence_synthetic = _decode_synthetic_batch(model, mu, shape)
+    return FINETUNE_LENGTH_WEIGHT * _length_moment_matching_loss(
+        strokes_recon_synthetic, existence_synthetic, mean, std, target_length_mean, target_length_std
     )
