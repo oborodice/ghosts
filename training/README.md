@@ -47,6 +47,10 @@ $ uv run scripts/visualize_reconstruction.py
 # どれだけ実在字らしいかを診断する(人間が名指しした軸に限らず、未知の差も拾い上げられる)
 $ uv run scripts/evaluate_generation_realism.py
 
+# 生成結果の各軸(ストローク数・長さ・曲がり具合・面積・軸方向率・孤立率・交差・3本以上合流)を
+# 実データと揃えた方法で数値化する
+$ uv run scripts/report_generation_stats.py
+
 # 事前分布N(0,I)からサンプリングし、実データへカーネル重み付けで引き寄せた後のzのdecode結果を目視確認する
 $ uv run scripts/visualize_prior_samples.py
 

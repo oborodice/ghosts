@@ -243,21 +243,23 @@ def draw_curves(ax: plt.Axes, curves: list[tuple[complex, complex, complex]]) ->
     ax.axis("off")
 
 
-def _stroke_endpoints_array(strokes: np.ndarray) -> np.ndarray:
-    # 戻り値のshapeは(slot_count, 2, 2) -- [スロット, 始点(0)/終点(1), xy]。
-    # connections行列の点index(偶数=始点, 奇数=終点)と対応させるため、existenceに関わらず全スロット分計算する
-    start = strokes[:, 0:2]
-    angle = strokes[:, 2]
-    length = strokes[:, 3]
+def stroke_endpoints_array(strokes: np.ndarray) -> np.ndarray:
+    # 入力(..., slot_count, 6)に対し、戻り値は(..., slot_count, 2(始点/終点), 2(xy))。先頭に
+    # バッチ次元があってもなくても(report_generation_stats.pyは複数字分をまとめて、connection_centersは
+    # 1字分だけを渡す)そのまま使えるよう、"..."で任意個の先頭次元を許容する。connections行列の点index
+    # (偶数=始点, 奇数=終点)と対応させるため、existenceに関わらず全スロット分計算する
+    start = strokes[..., 0:2]
+    angle = strokes[..., 2]
+    length = strokes[..., 3]
     direction = np.stack([np.cos(angle), np.sin(angle)], axis=-1)
-    end = start + length[:, None] * direction
-    return np.stack([start, end], axis=1)
+    end = start + length[..., None] * direction
+    return np.stack([start, end], axis=-2)
 
 
 def connection_centers(strokes: np.ndarray, connections: np.ndarray) -> list[complex]:
     # connectionsは上三角のみが立っている(extract_stroke_features.py参照)ので、立っている
     # 各ペアについて2点の中点をそのままズームイン表示の中心として返せばよい(重複は発生しない)
-    points = _stroke_endpoints_array(strokes).reshape(-1, 2)
+    points = stroke_endpoints_array(strokes).reshape(-1, 2)
     pair_indices = np.argwhere(connections)
     return [complex(*((points[i] + points[j]) / 2)) for i, j in pair_indices]
 

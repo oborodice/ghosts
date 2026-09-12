@@ -6,7 +6,9 @@ from vae_checkpoint import load_checkpoint
 from vae_eval_common import attract_to_latent_prior, decode_to_curves, draw_curves, encode, load_train_data
 from vae_model import select_device
 
-SAMPLE_COUNT = 6
+GRID_ROWS, GRID_COLS = 5, 6  # 1行だけだと個々のサンプルが小さく、崩れ方の共通パターンに気づきにくいため
+# グリッドにする(フェーズ8で交差・合流の悪化に気づいたのも、この形式で目視したことがきっかけ)
+SAMPLE_COUNT = GRID_ROWS * GRID_COLS
 
 
 def main() -> None:
@@ -22,9 +24,10 @@ def main() -> None:
     z = attract_to_latent_prior(z_raw, mu_real)
     curves = decode_to_curves(checkpoint, z)
 
-    _, axes = plt.subplots(nrows=1, ncols=SAMPLE_COUNT)
-    for ax, sample_curves in zip(axes, curves):
+    _, axes = plt.subplots(nrows=GRID_ROWS, ncols=GRID_COLS, figsize=(GRID_COLS * 1.5, GRID_ROWS * 1.5))
+    for ax, sample_curves in zip(axes.flat, curves):
         draw_curves(ax, sample_curves)
+    plt.tight_layout()
     plt.show()
 
 
