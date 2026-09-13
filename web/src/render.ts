@@ -43,7 +43,7 @@ function strokesToCurves(strokes: Float32Array, existenceProb: Float32Array): St
 function drawCurves(ctx: CanvasRenderingContext2D, curves: StrokeCurve[]): void {
   const scale = ctx.canvas.width / KANJI_VIEWBOX_SIZE;
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-  ctx.strokeStyle = "black";
+  ctx.strokeStyle = "white";
   ctx.lineWidth = 2;
 
   // KanjiVGのSVGはy軸が下向きで、canvasも同じ向きのため反転は不要(view_kanji.pyのmatplotlib向け反転とは対照的)
