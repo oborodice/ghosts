@@ -30,8 +30,9 @@ $ uv run scripts/extract_stroke_features.py
 # VAEを学習し、data/checkpoints/vae.ptへ保存する
 $ uv run scripts/train_vae.py
 
-# 収束済みのvae.ptに対し、ストローク数の多様性・ストローク長を実データに近づける追加の微調整を行い、
-# data/checkpoints/vae.ptを上書き保存する(2段階目。目標乖離が最小の時点でearly stoppingする)
+# 収束済みのvae.ptに対し、ストローク数の多様性・長さ・曲がり具合・交差数・3本以上合流を実データに
+# 近づける追加の微調整を行い、data/checkpoints/vae.ptを上書き保存する
+# (2段階目。5軸の複合乖離が最小の時点でearly stoppingする)
 $ uv run scripts/finetune_synthetic_stats.py
 
 # 学習済みモデル(vae.pt)の品質を数値で確認する

@@ -11,6 +11,7 @@ from vae_eval_common import attract_to_latent_prior, crossings_and_triple_juncti
 from vae_losses import AngleGMM, build_angle_gmm, compute_loss
 from vae_model import VAE, ModelShape, flatten_input, select_device, unflatten_output
 from vae_synthetic_losses import (
+    compute_finetune_curviness_loss,
     compute_finetune_length_loss,
     compute_finetune_stroke_count_loss,
     compute_synthetic_grammar_loss,
@@ -75,6 +76,8 @@ class _Targets(NamedTuple):
     real_count_all: torch.Tensor
     length_mean: torch.Tensor
     length_std: torch.Tensor
+    curviness_mean: torch.Tensor
+    curviness_std: torch.Tensor
     crossings_mean: float
     crossings_std: float
     triple_junction_mean: float
@@ -118,6 +121,9 @@ def _train_step(
     loss = loss + compute_synthetic_grammar_loss(model, mu, shape, mean, std, angle_gmm)
     loss = loss + compute_finetune_stroke_count_loss(model, mu, shape, targets.mu_all, targets.real_count_all)
     loss = loss + compute_finetune_length_loss(model, mu, shape, mean, std, targets.length_mean, targets.length_std)
+    loss = loss + compute_finetune_curviness_loss(
+        model, mu, shape, mean, std, targets.curviness_mean, targets.curviness_std
+    )
 
     optimizer.zero_grad()
     loss.backward()
@@ -128,6 +134,7 @@ def _train_step(
 class _PopulationStats(NamedTuple):
     stroke_count_mean: float
     length_mean: float
+    curviness_mean: float
     crossings_mean: float
     triple_junction_mean: float
 
@@ -136,7 +143,7 @@ def _measure_population_stats(
     model: VAE, shape: ModelShape, targets: _Targets, mean: torch.Tensor, std: torch.Tensor
 ) -> _PopulationStats:
     # report_generation_stats(検証用スクリプト)と同じ方法(事前分布からのサンプル+attract)で、
-    # 母集団のストローク数・長さ・交差数・3本以上合流の平均を同じサンプルから算出する
+    # 母集団のストローク数・長さ・曲がり具合・交差数・3本以上合流の平均を同じサンプルから算出する
     model.eval()
     mu_all = targets.mu_all
     z_raw = torch.randn(EVAL_SAMPLE_COUNT, mu_all.shape[1], device=mu_all.device)
@@ -147,12 +154,18 @@ def _measure_population_stats(
         existence_pred = existence_mask_from_logits(existence_logits)
         existence_pred_tensor = torch.from_numpy(existence_pred).float().to(mu_all.device)
         length = strokes_recon[..., 3] * std[3] + mean[3]
+        curviness = torch.linalg.norm(strokes_recon[..., 4:6] * std[4:6] + mean[4:6], dim=-1)
         strokes_recon_real = (strokes_recon * std + mean).cpu().numpy()
     stroke_count_mean = existence_pred.sum(axis=1).mean()
     length_mean, _, _ = masked_mean_std(length, existence_pred_tensor)
+    curviness_mean, _, _ = masked_mean_std(curviness, existence_pred_tensor)
     crossings_per_char, _, triple_junction_per_char = crossings_and_triple_junctions(strokes_recon_real, existence_pred)
     return _PopulationStats(
-        stroke_count_mean, length_mean.mean().item(), crossings_per_char.mean(), triple_junction_per_char.mean()
+        stroke_count_mean,
+        length_mean.mean().item(),
+        curviness_mean.mean().item(),
+        crossings_per_char.mean(),
+        triple_junction_per_char.mean(),
     )
 
 
@@ -164,21 +177,30 @@ def _zscore_deviation(current: float, target_mean: float, target_std: float) -> 
     return (current - target_mean) / target_std
 
 
-def _compute_deviation(stats: _PopulationStats, targets: _Targets, target_count: float, target_length: float) -> float:
-    # 単位の異なる4つの乖離を、無次元の1つの複合スコアにまとめる。ストローク数・長さは目標値に対する
-    # 相対誤差(値そのものが14・33程度で十分大きいため、この正規化が素直に機能する)。交差数・
-    # 3本以上合流は目標値(平均)がゼロに近く、同じ相対誤差の定義だと少しの絶対誤差でも比率が
-    # 発散してしまうため、代わりに実データの標準偏差を基準にした乖離(z-score的な発想)を使う。
-    # 交差数・3本以上合流を追加したのは、ストローク長の微調整がこの2軸を悪化させる副作用を持つと
-    # 判明したため。ストローク数・長さだけを見て早期終了すると、この副作用に気づかないまま
-    # 「ストローク数・長さだけは良い」チェックポイントを採用してしまう
+def _compute_deviation(
+    stats: _PopulationStats, targets: _Targets, target_count: float, target_length: float, target_curviness: float
+) -> float:
+    # 単位の異なる5つの乖離を、無次元の1つの複合スコアにまとめる。ストローク数・長さ・曲がり具合は
+    # 目標値に対する相対誤差(値そのものが14・33・4.5程度でゼロから離れているため、この正規化が
+    # 素直に機能する)。交差数・3本以上合流は目標値(平均)がゼロに近く、同じ相対誤差の定義だと
+    # 少しの絶対誤差でも比率が発散してしまうため、代わりに実データの標準偏差を基準にした乖離
+    # (z-score的な発想)を使う。交差数・3本以上合流を追加したのは、ストローク長の微調整がこの2軸を
+    # 悪化させる副作用を持つと判明したため。ストローク数・長さだけを見て早期終了すると、この副作用に
+    # 気づかないまま「ストローク数・長さだけは良い」チェックポイントを採用してしまう
     count_deviation = _relative_deviation(stats.stroke_count_mean, target_count)
     length_deviation = _relative_deviation(stats.length_mean, target_length)
+    curviness_deviation = _relative_deviation(stats.curviness_mean, target_curviness)
     crossings_deviation = _zscore_deviation(stats.crossings_mean, targets.crossings_mean, targets.crossings_std)
     triple_junction_deviation = _zscore_deviation(
         stats.triple_junction_mean, targets.triple_junction_mean, targets.triple_junction_std
     )
-    return count_deviation**2 + length_deviation**2 + crossings_deviation**2 + triple_junction_deviation**2
+    return (
+        count_deviation**2
+        + length_deviation**2
+        + curviness_deviation**2
+        + crossings_deviation**2
+        + triple_junction_deviation**2
+    )
 
 
 def _compute_targets(
@@ -194,8 +216,11 @@ def _compute_targets(
         mu_all, _ = model.encode(flatten_input(train_strokes_standardized, train_existence))
         train_strokes_real = train_strokes_standardized * std + mean
         length_mean, length_std, length_count = masked_mean_std(train_strokes_real[..., 3], train_existence)
+        curviness = torch.linalg.norm(train_strokes_real[..., 4:6], dim=-1)
+        curviness_mean, curviness_std, curviness_count = masked_mean_std(curviness, train_existence)
         # ストローク数1以下の字は標準偏差が定義できない(常に0になる)ため、目標値の算出からは除外する
         length_valid = length_count >= 2
+        curviness_valid = curviness_count >= 2
         crossings_per_char, _, triple_junction_per_char = crossings_and_triple_junctions(
             train_strokes_real.cpu().numpy(), train_existence.cpu().numpy()
         )
@@ -205,6 +230,8 @@ def _compute_targets(
         real_count_all,
         length_mean[length_valid].mean(),
         length_std[length_valid].mean(),
+        curviness_mean[curviness_valid].mean(),
+        curviness_std[curviness_valid].mean(),
         crossings_per_char.mean(),
         crossings_per_char.std(),
         triple_junction_per_char.mean(),
@@ -232,8 +259,10 @@ def main() -> None:
     targets = _compute_targets(model, train_strokes_standardized, train_existence, mean, std)
     target_count = targets.real_count_all.mean().item()
     target_length = targets.length_mean.item()
+    target_curviness = targets.curviness_mean.item()
     print(f"target stroke count mean (train split average) = {target_count:.2f}")
     print(f"target stroke length mean (train split average) = {target_length:.2f}")
+    print(f"target curviness mean (train split average) = {target_curviness:.2f}")
     print(f"target crossings mean(std) = {targets.crossings_mean:.3f}({targets.crossings_std:.3f})")
     print(f"target triple_junction mean(std) = {targets.triple_junction_mean:.3f}({targets.triple_junction_std:.3f})")
 
@@ -258,10 +287,11 @@ def main() -> None:
             continue
 
         stats = _measure_population_stats(model, shape, targets, mean, std)
-        deviation = _compute_deviation(stats, targets, target_count, target_length)
+        deviation = _compute_deviation(stats, targets, target_count, target_length, target_curviness)
         print(
             f"step {step}: loss={loss.item():.2f} stroke_count_mean={stats.stroke_count_mean:.2f} "
-            f"stroke_length_mean={stats.length_mean:.2f} crossings_mean={stats.crossings_mean:.3f} "
+            f"stroke_length_mean={stats.length_mean:.2f} curviness_mean={stats.curviness_mean:.3f} "
+            f"crossings_mean={stats.crossings_mean:.3f} "
             f"triple_junction_mean={stats.triple_junction_mean:.3f} deviation={deviation:.4f}"
         )
         if tracker.update(step, deviation, model):

@@ -44,6 +44,16 @@ FINETUNE_LENGTH_WEIGHT = 0.5  # weight sweepの結果、1.0は数百ステップ
 # 目標付近を通過するまでの時間が長く、early stoppingで捉えやすいため採用した(0.3はさらに緩やかだが、
 # 4000ステップ時点でまだ目標に届いておらず収束が遅すぎた)
 
+# 2段階目の微調整専用の曲がり具合損失。生成結果は実データより曲がりが小さく(平均1.89 vs 4.49)、
+# ばらつきも乏しい(std1.39 vs 4.84)偏りがあり、分類器診断で全軸中最大の説明力(93.6%)を持つと判明済み。
+# ストローク長と原因の性質が同じ(実データ自身の再構成でも85%まで目減りするが、生成経路(prior+attract)
+# だけでさらに42%まで崩れる、合成zパイプライン特有の収縮)と確認できたため、ストローク長と同型の
+# moment matching損失(バッチ全体の統計を実データ全体の固定値に近づける)をそのまま転用する
+FINETUNE_CURVINESS_WEIGHT = 1.0  # weight sweep(0.3・0.5・1.0・2.0)の結果、2.0は目標到達後も一貫して
+# 上昇し続け頭打ちにならない(ストローク長の1.0と同じ挙動)のに対し、1.0は目標付近(4.0〜4.8程度)で
+# 4000ステップ以上緩やかに推移してから上振れするため、early stoppingで捉えやすいとして採用した
+# (0.3・0.5は4000ステップ時点でも目標に届いておらず収束が遅すぎた)
+
 
 def _kernel_weights(z_raw: torch.Tensor, mu_batch: torch.Tensor, bandwidth: float) -> torch.Tensor:
     # Nadaraya-Watson推定量のカーネル重み。_attract_batch(zの引き寄せ)と
@@ -195,4 +205,41 @@ def compute_finetune_length_loss(
     strokes_recon_synthetic, existence_synthetic = _decode_synthetic_batch(model, mu, shape)
     return FINETUNE_LENGTH_WEIGHT * _length_moment_matching_loss(
         strokes_recon_synthetic, existence_synthetic, mean, std, target_length_mean, target_length_std
+    )
+
+
+def _curviness_moment_matching_loss(
+    strokes_recon: torch.Tensor,
+    existence: torch.Tensor,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    target_curviness_mean: torch.Tensor,
+    target_curviness_std: torch.Tensor,
+) -> torch.Tensor:
+    # _length_moment_matching_lossと同じ発想。曲がり具合はoffset_x・offset_y(StrokeFeatures参照)の
+    # ベクトルの大きさとして定義する(report_generation_stats.pyのcurvinessと同じ)
+    offset = strokes_recon[..., 4:6] * std[4:6] + mean[4:6]
+    curviness = torch.linalg.norm(offset, dim=-1)
+    per_sample_mean, per_sample_std, count = masked_mean_std(curviness, existence)
+    valid = count >= 2  # 標準偏差は2点以上ないと定義できない
+    if valid.sum() == 0:
+        return torch.zeros((), device=strokes_recon.device)
+    batch_mean = per_sample_mean[valid].mean()
+    batch_std = per_sample_std[valid].mean()
+    return (batch_mean - target_curviness_mean) ** 2 + (batch_std - target_curviness_std) ** 2
+
+
+def compute_finetune_curviness_loss(
+    model: VAE,
+    mu: torch.Tensor,
+    shape: ModelShape,
+    mean: torch.Tensor,
+    std: torch.Tensor,
+    target_curviness_mean: torch.Tensor,
+    target_curviness_std: torch.Tensor,
+) -> torch.Tensor:
+    # 目標値が一律の値のため、compute_finetune_length_lossと同じ構築方法(_decode_synthetic_batch)を使う
+    strokes_recon_synthetic, existence_synthetic = _decode_synthetic_batch(model, mu, shape)
+    return FINETUNE_CURVINESS_WEIGHT * _curviness_moment_matching_loss(
+        strokes_recon_synthetic, existence_synthetic, mean, std, target_curviness_mean, target_curviness_std
     )
