@@ -48,6 +48,10 @@ $ uv run scripts/visualize_reconstruction.py
 # どれだけ実在字らしいかを診断する(人間が名指しした軸に限らず、未知の差も拾い上げられる)
 $ uv run scripts/evaluate_generation_realism.py
 
+# 本物/偽物を、数値特徴量ではなく実際にレンダリングした画像で判別する診断分類器。
+# 数値特徴量では見えている差異が、人間の視覚に近い形(低解像度・軽いぼかし)でも見分けられるかを確認する
+$ uv run scripts/evaluate_generation_realism_visual.py
+
 # 生成結果の各軸(ストローク数・長さ・曲がり具合・面積・軸方向率・孤立率・交差・3本以上合流・
 # 同方向ストロークの束)を実データと揃えた方法で数値化する
 $ uv run scripts/report_generation_stats.py
