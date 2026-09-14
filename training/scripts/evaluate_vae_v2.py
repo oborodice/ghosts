@@ -1,48 +1,70 @@
 #!/usr/bin/env python3
-# 頂点のみのこの段階でも意味が成り立つ再構成品質のチェック(損失の内訳・潜在次元ごとのKL・重みの健全性・
-# 誤差分布・丸暗記化の確認・重複スロットの検出)を行う。交差数・3本以上合流・接続距離のチェックは
-# ストロークのポインタ機構がまだ無いため対象外
-from typing import NamedTuple
-
+# 頂点+ストローク全体の再構成品質のチェック(損失の内訳・潜在次元ごとのKL・重みの健全性・誤差分布・
+# 丸暗記化の確認・頂点の重複スロットの検出)を行う。交差数・3本以上合流の集計はまだ交差抑制損失を
+# 追加していないため対象外
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from vae_checkpoint_v2 import load_checkpoint
 from vae_data_v2 import prepare_datasets
-from vae_eval_common_v2 import ACTIVE_UNIT_THRESHOLD, kl_per_dim as compute_kl_per_dim, vertex_distance_real
-from vae_model_v2 import VAE, ModelShape, flatten_input, select_device, unflatten_output
+from vae_eval_common_v2 import (
+    ACTIVE_UNIT_THRESHOLD,
+    Batch,
+    encode_batch,
+    kl_per_dim as compute_kl_per_dim,
+    load_batch,
+    vertex_distance_real,
+)
+from vae_losses_v2 import pointer_loss
+from vae_model_v2 import VAE, DecoderOutput, select_device
 
 WORST_SAMPLE_COUNT = 5
 DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ未満なら、デコーダが同じ頂点を複数スロットに重複して割り当てているとみなす閾値
 EXISTENCE_THRESHOLD = 0.5  # existenceの確率(Sigmoid(existence_logits))をbool判定に変換する閾値
 
 
-class ForwardResult(NamedTuple):
-    vertices: torch.Tensor
-    existence: torch.Tensor
-    vertices_recon: torch.Tensor
-    existence_logits: torch.Tensor
-
-
 def _existence_mask_from_logits(existence_logits: torch.Tensor) -> np.ndarray:
     return (torch.sigmoid(existence_logits) > EXISTENCE_THRESHOLD).cpu().numpy()
 
 
-def _print_loss_breakdown(result: ForwardResult, kl_per_dim: torch.Tensor) -> None:
+def _print_loss_breakdown(batch: Batch, decoder_output: DecoderOutput, mu: torch.Tensor, logvar: torch.Tensor) -> None:
     print("== 1. Loss breakdown ==")
-    # vae_losses_v2.compute_lossと同じ集約方法(sum→batch mean)で個別に集計する
-    vertices, existence, vertices_recon, existence_logits = result
-    mask = existence.unsqueeze(-1)
-    vertex_loss = (((vertices_recon - vertices) ** 2) * mask).sum(dim=(1, 2)).mean()
-    existence_loss = (
-        F.binary_cross_entropy_with_logits(existence_logits, existence, reduction="none").sum(dim=1).mean()
+    vertex_mask = batch.vertex_existence.unsqueeze(-1)
+    vertex_loss = (((decoder_output.vertex_features - batch.vertices) ** 2) * vertex_mask).sum(dim=(1, 2)).mean()
+    vertex_existence_loss = (
+        F.binary_cross_entropy_with_logits(
+            decoder_output.vertex_existence_logits, batch.vertex_existence, reduction="none"
+        )
+        .sum(dim=1)
+        .mean()
     )
-    kl_divergence = kl_per_dim.sum()
+    start_pointer_loss = pointer_loss(
+        decoder_output.start_pointer_logits, batch.stroke_vertex_indices[..., 0], batch.stroke_existence
+    )
+    end_pointer_loss = pointer_loss(
+        decoder_output.end_pointer_logits, batch.stroke_vertex_indices[..., 1], batch.stroke_existence
+    )
+    stroke_offset_mask = batch.stroke_existence.unsqueeze(-1)
+    stroke_offset_loss = (
+        ((decoder_output.stroke_offsets - batch.stroke_offsets) ** 2) * stroke_offset_mask
+    ).sum(dim=(1, 2)).mean()
+    stroke_existence_loss = (
+        F.binary_cross_entropy_with_logits(
+            decoder_output.stroke_existence_logits, batch.stroke_existence, reduction="none"
+        )
+        .sum(dim=1)
+        .mean()
+    )
+    kl_divergence = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
 
-    print(f"vertex_loss:    {vertex_loss.item():.4f}")
-    print(f"existence_loss: {existence_loss.item():.4f}")
-    print(f"kl_divergence:  {kl_divergence.item():.4f}")
+    print(f"vertex_loss:           {vertex_loss.item():.4f}")
+    print(f"vertex_existence_loss: {vertex_existence_loss.item():.4f}")
+    print(f"start_pointer_loss:    {start_pointer_loss.item():.4f}")
+    print(f"end_pointer_loss:      {end_pointer_loss.item():.4f}")
+    print(f"stroke_offset_loss:    {stroke_offset_loss.item():.4f}")
+    print(f"stroke_existence_loss: {stroke_existence_loss.item():.4f}")
+    print(f"kl_divergence:         {kl_divergence.item():.4f}")
     print()
 
 
@@ -67,42 +89,62 @@ def _print_weight_health(model: VAE) -> None:
     print()
 
 
-def _decode_deterministic(
-    model: VAE, mu: torch.Tensor, shape: ModelShape, vertices_std: torch.Tensor, existence: torch.Tensor
-) -> ForwardResult:
+def _decode_deterministic(model: VAE, mu: torch.Tensor) -> DecoderOutput:
     # 誤差分布・丸暗記化チェックで共通して使う決定論的デコード(ノイズのないmuから)
-    recon = model.decode(mu)
-    vertices_recon, existence_logits = unflatten_output(recon, shape)
-    return ForwardResult(vertices_std, existence, vertices_recon, existence_logits)
+    return model.decode(mu)
 
 
-def _vertex_mse(result: ForwardResult) -> np.ndarray:
-    vertices, existence, vertices_recon, _ = result
-    feature_dim = vertices.shape[-1]
-    mask = existence.unsqueeze(-1)
+def _vertex_mse(batch: Batch, decoder_output: DecoderOutput) -> np.ndarray:
+    mask = batch.vertex_existence.unsqueeze(-1)
+    feature_dim = batch.vertices.shape[-1]
     # 実在するスロット・座標軸あたりの平均二乗誤差(頂点数による誤差の見かけ上の増減を避けるため、和ではなく平均を取る)
-    sample_mse = ((vertices_recon - vertices) ** 2 * mask).sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) * feature_dim)
+    sample_mse = ((decoder_output.vertex_features - batch.vertices) ** 2 * mask).sum(dim=(1, 2)) / (
+        mask.sum(dim=(1, 2)) * feature_dim
+    )
     return sample_mse.cpu().numpy()
 
 
-def _print_error_distribution(result: ForwardResult, mean: torch.Tensor, std: torch.Tensor) -> None:
-    print("== 4. Validation-wide error distribution ==")
-    vertices, existence, vertices_recon, existence_logits = result
-    sample_mse = _vertex_mse(result)
-    distance_real = vertex_distance_real(vertices, existence, vertices_recon, mean, std)
+def _pointer_accuracy(logits: torch.Tensor, target_index: torch.Tensor, stroke_existence: torch.Tensor) -> np.ndarray:
+    # サンプルごとの、実在するストロークのうちポインタが正解頂点を選べた割合(top-1)
+    correct = (logits.argmax(dim=-1) == target_index).float()
+    return ((correct * stroke_existence).sum(dim=1) / stroke_existence.sum(dim=1)).cpu().numpy()
 
-    existence_pred = _existence_mask_from_logits(existence_logits)
-    existence_true = existence.cpu().numpy().astype(bool)
-    sample_accuracy = (existence_pred == existence_true).mean(axis=1)
+
+def _print_error_distribution(
+    batch: Batch, decoder_output: DecoderOutput, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
+) -> None:
+    print("== 4. Validation-wide error distribution ==")
+    sample_mse = _vertex_mse(batch, decoder_output)
+    distance_real = vertex_distance_real(
+        batch.vertices, batch.vertex_existence, decoder_output.vertex_features, vertex_mean, vertex_std
+    )
+    existence_pred = _existence_mask_from_logits(decoder_output.vertex_existence_logits)
+    existence_true = batch.vertex_existence.cpu().numpy().astype(bool)
+    vertex_existence_accuracy = (existence_pred == existence_true).mean(axis=1)
+
+    start_accuracy = _pointer_accuracy(
+        decoder_output.start_pointer_logits, batch.stroke_vertex_indices[..., 0], batch.stroke_existence
+    )
+    end_accuracy = _pointer_accuracy(
+        decoder_output.end_pointer_logits, batch.stroke_vertex_indices[..., 1], batch.stroke_existence
+    )
+
+    stroke_offset_mask = batch.stroke_existence.unsqueeze(-1)
+    stroke_offset_mse = (
+        (decoder_output.stroke_offsets - batch.stroke_offsets) ** 2 * stroke_offset_mask
+    ).sum(dim=(1, 2)) / (stroke_offset_mask.sum(dim=(1, 2)) * batch.stroke_offsets.shape[-1])
 
     print(f"vertex MSE (standardized scale): mean={sample_mse.mean():.4f} max={sample_mse.max():.4f}")
     print(f"vertex distance (real coordinate scale): mean={distance_real.mean():.4f} max={distance_real.max():.4f}")
-    print(f"existence accuracy: mean={sample_accuracy.mean():.4f} min={sample_accuracy.min():.4f}")
+    print(f"vertex existence accuracy: mean={vertex_existence_accuracy.mean():.4f} min={vertex_existence_accuracy.min():.4f}")
+    print(f"start pointer accuracy (top-1): mean={start_accuracy.mean():.4f} min={start_accuracy.min():.4f}")
+    print(f"end pointer accuracy (top-1):   mean={end_accuracy.mean():.4f} min={end_accuracy.min():.4f}")
+    print(f"stroke offset MSE (standardized scale): mean={stroke_offset_mse.mean():.4f} max={stroke_offset_mse.max():.4f}")
 
     worst_indices = np.argsort(sample_mse)[::-1][:WORST_SAMPLE_COUNT]
     print(f"Validation samples with largest vertex MSE (top {WORST_SAMPLE_COUNT}):")
     for index in worst_indices:
-        print(f"  index={index}: mse={sample_mse[index]:.4f} existence_accuracy={sample_accuracy[index]:.4f}")
+        print(f"  index={index}: mse={sample_mse[index]:.4f} existence_accuracy={vertex_existence_accuracy[index]:.4f}")
     print()
 
 
@@ -113,8 +155,10 @@ def _avg_exp_logvar(logvar: torch.Tensor, alive_mask: torch.Tensor) -> float:
 
 
 def _print_memorization_check(
-    val_result: ForwardResult,
-    train_result: ForwardResult,
+    val_batch: Batch,
+    val_decoder_output: DecoderOutput,
+    train_batch: Batch,
+    train_decoder_output: DecoderOutput,
     val_logvar: torch.Tensor,
     train_logvar: torch.Tensor,
     kl_per_dim: torch.Tensor,
@@ -122,8 +166,8 @@ def _print_memorization_check(
     # 生成(z〜N(0,1)からのdecode)は学習で一度も使っていないzから始まるため、
     # encoderが各学習データにノイズなしの点を割り当てて丸暗記していないか(過学習していないか)を確認する
     print("== 5. Memorization check ==")
-    val_mse = _vertex_mse(val_result).mean()
-    train_mse = _vertex_mse(train_result).mean()
+    val_mse = _vertex_mse(val_batch, val_decoder_output).mean()
+    train_mse = _vertex_mse(train_batch, train_decoder_output).mean()
 
     alive_mask = kl_per_dim >= ACTIVE_UNIT_THRESHOLD
     val_avg_exp_logvar = _avg_exp_logvar(val_logvar, alive_mask)
@@ -137,12 +181,12 @@ def _print_memorization_check(
     print()
 
 
-def _count_duplicate_slots(vertices_recon: torch.Tensor, existence_mask: torch.Tensor) -> np.ndarray:
+def _count_duplicate_slots(vertex_features: torch.Tensor, existence_mask: torch.Tensor) -> np.ndarray:
     # 各サンプルで、存在すると判定されたスロット同士の座標が極端に近いペアを数える
     counts = []
-    for sample_idx in range(vertices_recon.shape[0]):
+    for sample_idx in range(vertex_features.shape[0]):
         active_indices = existence_mask[sample_idx].nonzero(as_tuple=True)[0]
-        positions = vertices_recon[sample_idx, active_indices]
+        positions = vertex_features[sample_idx, active_indices]
         if len(active_indices) < 2:
             counts.append(0)
             continue
@@ -153,11 +197,10 @@ def _count_duplicate_slots(vertices_recon: torch.Tensor, existence_mask: torch.T
     return np.array(counts)
 
 
-def _print_duplicate_slots(result: ForwardResult) -> None:
+def _print_duplicate_slots(decoder_output: DecoderOutput) -> None:
     print("== 6. Duplicate slot check ==")
-    _, _, vertices_recon, existence_logits = result
-    existence_mask = torch.from_numpy(_existence_mask_from_logits(existence_logits))
-    duplicate_counts = _count_duplicate_slots(vertices_recon, existence_mask)
+    existence_mask = torch.from_numpy(_existence_mask_from_logits(decoder_output.vertex_existence_logits))
+    duplicate_counts = _count_duplicate_slots(decoder_output.vertex_features, existence_mask)
 
     print(f"Samples with >=1 near-duplicate slot pair: {(duplicate_counts > 0).sum()} / {len(duplicate_counts)}")
     print(f"Average near-duplicate pairs per sample: {duplicate_counts.mean():.4f}")
@@ -169,35 +212,30 @@ def main() -> None:
     checkpoint = load_checkpoint(device)
     datasets = prepare_datasets()
 
-    # TensorDataset.tensorsはフィールド名を持たないタプルなので、この(頂点, existence)という順序は
-    # vae_data_v2._build_datasetがTensorDatasetを組み立てる際の引数順と対応させる必要がある
-    val_vertices_std, val_existence = (t.to(device) for t in datasets.val.tensors)
-    train_vertices_std, train_existence = (t.to(device) for t in datasets.train.tensors)
+    val_batch = load_batch(datasets, "val", device)
+    train_batch = load_batch(datasets, "train", device)
 
     with torch.no_grad():
         # 損失の内訳・KLは学習時のvalidation lossと同じ経路(サンプリングzを含むforward)で再現する
-        recon, mu, logvar = checkpoint.model(flatten_input(val_vertices_std, val_existence))
-        vertices_recon, existence_logits = unflatten_output(recon, checkpoint.shape)
-        result = ForwardResult(val_vertices_std, val_existence, vertices_recon, existence_logits)
+        mu, logvar = encode_batch(checkpoint, val_batch)
+        decoder_output = checkpoint.model.decode(checkpoint.model.reparameterize(mu, logvar))
 
         # 誤差分布はワースト字形を実行のたびに入れ替えたくないため、ノイズのないmuから決定論的にデコードする
-        result_deterministic = _decode_deterministic(
-            checkpoint.model, mu, checkpoint.shape, val_vertices_std, val_existence
-        )
+        val_decoder_output = _decode_deterministic(checkpoint.model, mu)
 
         # 丸暗記化チェック用にtrain側も同じ経路で再構成する
-        train_mu, train_logvar = checkpoint.model.encode(flatten_input(train_vertices_std, train_existence))
-        train_result = _decode_deterministic(
-            checkpoint.model, train_mu, checkpoint.shape, train_vertices_std, train_existence
-        )
+        train_mu, train_logvar = encode_batch(checkpoint, train_batch)
+        train_decoder_output = _decode_deterministic(checkpoint.model, train_mu)
 
     kl_per_dim = compute_kl_per_dim(mu, logvar)
-    _print_loss_breakdown(result, kl_per_dim)
+    _print_loss_breakdown(val_batch, decoder_output, mu, logvar)
     _print_active_units(kl_per_dim)
     _print_weight_health(checkpoint.model)
-    _print_error_distribution(result_deterministic, checkpoint.mean, checkpoint.std)
-    _print_memorization_check(result_deterministic, train_result, logvar, train_logvar, kl_per_dim)
-    _print_duplicate_slots(result_deterministic)
+    _print_error_distribution(val_batch, val_decoder_output, checkpoint.vertex_mean, checkpoint.vertex_std)
+    _print_memorization_check(
+        val_batch, val_decoder_output, train_batch, train_decoder_output, logvar, train_logvar, kl_per_dim
+    )
+    _print_duplicate_slots(val_decoder_output)
 
 
 if __name__ == "__main__":

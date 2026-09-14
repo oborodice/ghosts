@@ -12,8 +12,10 @@ class Checkpoint(NamedTuple):
     shape: ModelShape
     hidden_dims: tuple[int, int]
     slot_attention_config: SlotAttentionConfig
-    mean: torch.Tensor
-    std: torch.Tensor
+    vertex_mean: torch.Tensor
+    vertex_std: torch.Tensor
+    stroke_offset_mean: torch.Tensor
+    stroke_offset_std: torch.Tensor
     latent_dim: int
 
 
@@ -21,7 +23,7 @@ def load_checkpoint(device: torch.device, checkpoint_path: Path = CHECKPOINT_PAT
     # checkpoint_pathはデフォルトでこのモジュールの標準チェックポイントを指すが、複数候補を比較する
     # 用途で、候補ごとのチェックポイントを個別に読み込めるよう、明示的に上書きできるようにしている
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    shape = ModelShape(checkpoint["slot_count"], checkpoint["feature_dim"])
+    shape = ModelShape(*checkpoint["shape"])
     slot_attention_config = SlotAttentionConfig(*checkpoint["slot_attention_config"])
     model = VAE(shape, checkpoint["hidden_dims"], checkpoint["latent_dim"], slot_attention_config).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -31,8 +33,10 @@ def load_checkpoint(device: torch.device, checkpoint_path: Path = CHECKPOINT_PAT
         shape,
         checkpoint["hidden_dims"],
         slot_attention_config,
-        checkpoint["mean"].to(device),
-        checkpoint["std"].to(device),
+        checkpoint["vertex_mean"].to(device),
+        checkpoint["vertex_std"].to(device),
+        checkpoint["stroke_offset_mean"].to(device),
+        checkpoint["stroke_offset_std"].to(device),
         checkpoint["latent_dim"],
     )
 
@@ -43,8 +47,10 @@ def save_checkpoint(
     hidden_dims: tuple[int, int],
     latent_dim: int,
     slot_attention_config: SlotAttentionConfig,
-    mean: torch.Tensor,
-    std: torch.Tensor,
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
     checkpoint_path: Path,
 ) -> None:
     # 生成(推論)に必要な情報のみを保存する(学習再開用のoptimizer状態・epoch数などは含まない)。
@@ -60,10 +66,11 @@ def save_checkpoint(
             # torch.loadのweights_only=True(デフォルト)はNamedTupleサブクラスを許可しないため、
             # プレーンなtupleとして保存する
             "slot_attention_config": tuple(slot_attention_config),
-            "slot_count": shape.slot_count,
-            "feature_dim": shape.feature_dim,
-            "mean": mean.detach().cpu(),
-            "std": std.detach().cpu(),
+            "shape": tuple(shape),
+            "vertex_mean": vertex_mean.detach().cpu(),
+            "vertex_std": vertex_std.detach().cpu(),
+            "stroke_offset_mean": stroke_offset_mean.detach().cpu(),
+            "stroke_offset_std": stroke_offset_std.detach().cpu(),
         },
         checkpoint_path,
     )

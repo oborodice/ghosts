@@ -18,7 +18,6 @@ from vae_model_v2 import (
     ModelShape,
     SlotAttentionConfig,
     flatten_input,
-    unflatten_output,
 )
 
 SLOT_ATTENTION_CONFIG = SlotAttentionConfig(
@@ -53,19 +52,26 @@ def _run_epoch(
 
     total_loss = 0.0
     with torch.set_grad_enabled(is_training):
-        for vertices_batch, existence_batch in loader:
-            vertices_batch = vertices_batch.to(device)
-            existence_batch = existence_batch.to(device)
-            recon, mu, logvar = model(flatten_input(vertices_batch, existence_batch))
-            vertices_recon, existence_logits = unflatten_output(recon, shape)
-            loss = compute_loss(vertices_batch, existence_batch, vertices_recon, existence_logits, mu, logvar, beta)
+        for batch in loader:
+            vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence = (
+                t.to(device) for t in batch
+            )
+
+            x = flatten_input(
+                vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence, shape
+            )
+            decoder_output, mu, logvar = model(x)
+            loss = compute_loss(
+                vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence,
+                decoder_output, mu, logvar, beta,
+            )
 
             if optimizer is not None:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-            total_loss += loss.item() * vertices_batch.size(0)
+            total_loss += loss.item() * vertices.size(0)
     return total_loss / len(loader.dataset)
 
 
@@ -96,8 +102,10 @@ def train(
 
     model = VAE(datasets.shape, hidden_dims, latent_dim, slot_attention_config).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    mean_tensor = torch.tensor(datasets.mean, dtype=torch.float32, device=device)
-    std_tensor = torch.tensor(datasets.std, dtype=torch.float32, device=device)
+    vertex_mean = torch.tensor(datasets.vertex_mean, dtype=torch.float32, device=device)
+    vertex_std = torch.tensor(datasets.vertex_std, dtype=torch.float32, device=device)
+    stroke_offset_mean = torch.tensor(datasets.stroke_offset_mean, dtype=torch.float32, device=device)
+    stroke_offset_std = torch.tensor(datasets.stroke_offset_std, dtype=torch.float32, device=device)
 
     best_val_loss = float("inf")
     epochs_without_improvement = 0
@@ -114,7 +122,7 @@ def train(
             epochs_without_improvement = 0
             save_checkpoint(
                 model, datasets.shape, hidden_dims, latent_dim, slot_attention_config,
-                mean_tensor, std_tensor, checkpoint_path,
+                vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std, checkpoint_path,
             )
         else:
             epochs_without_improvement += 1

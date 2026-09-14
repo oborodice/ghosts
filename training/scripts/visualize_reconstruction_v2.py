@@ -1,64 +1,111 @@
 #!/usr/bin/env python3
-# ストロークの曲線(vae_eval_common.draw_curves相当)はまだ無い段階のため、頂点を点群として描画する
+from typing import NamedTuple
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from vae_checkpoint_v2 import load_checkpoint
+from vae_checkpoint_v2 import Checkpoint, load_checkpoint
 from vae_data_v2 import prepare_datasets
-from vae_model_v2 import flatten_input, select_device, unflatten_output
+from vae_eval_common import draw_curves
+from vae_eval_common_v2 import Batch, encode_batch, load_batch, to_real_scale
+from vae_model_v2 import DecoderOutput, select_device
 
 TYPICAL_INDICES = [0, 1, 2, 3]  # 典型的なサンプルとして固定で表示する検証データの先頭4件
-POINT_SIZE = 20  # 正解・再構成の各点を見分けやすい大きさとして目視で選んだ値
-DISPLACEMENT_LINE_WIDTH = 0.6  # 正解と再構成を結ぶ線が点より目立ちすぎないよう目視で選んだ値
 
 
-def _sample_mean_distance(true_real: np.ndarray, existence: np.ndarray, recon_real: np.ndarray) -> np.ndarray:
-    # サンプルごとの平均距離(存在する頂点のみ)。ワースト字を選ぶために使う
+class RealScaleStrokes(NamedTuple):
+    start: np.ndarray  # (N, stroke_count, 2)
+    end: np.ndarray  # (N, stroke_count, 2)
+    offsets: np.ndarray  # (N, stroke_count, 2)
+
+
+def _decode(checkpoint: Checkpoint, batch: Batch) -> DecoderOutput:
+    with torch.no_grad():
+        # 再パラメータ化のサンプリングεによるランダム性を排除するため、muをそのままdecodeする
+        mu, _ = encode_batch(checkpoint, batch)
+        return checkpoint.model.decode(mu)
+
+
+def _true_strokes_real(checkpoint: Checkpoint, batch: Batch) -> RealScaleStrokes:
+    vertices_real = to_real_scale(batch.vertices, checkpoint.vertex_mean, checkpoint.vertex_std)
+    start_index = batch.stroke_vertex_indices[..., 0:1].cpu().numpy()
+    end_index = batch.stroke_vertex_indices[..., 1:2].cpu().numpy()
+    offsets_real = to_real_scale(batch.stroke_offsets, checkpoint.stroke_offset_mean, checkpoint.stroke_offset_std)
+    return RealScaleStrokes(
+        np.take_along_axis(vertices_real, start_index, axis=1),
+        np.take_along_axis(vertices_real, end_index, axis=1),
+        offsets_real,
+    )
+
+
+def _reconstructed_strokes_real(checkpoint: Checkpoint, decoder_output: DecoderOutput) -> RealScaleStrokes:
+    start_real = to_real_scale(decoder_output.start_points, checkpoint.vertex_mean, checkpoint.vertex_std)
+    end_real = to_real_scale(decoder_output.end_points, checkpoint.vertex_mean, checkpoint.vertex_std)
+    offsets_real = to_real_scale(
+        decoder_output.stroke_offsets, checkpoint.stroke_offset_mean, checkpoint.stroke_offset_std
+    )
+    return RealScaleStrokes(start_real, end_real, offsets_real)
+
+
+def _sample_mean_vertex_distance(true_real: np.ndarray, existence: np.ndarray, recon_real: np.ndarray) -> np.ndarray:
+    # サンプルごとの頂点の平均距離(存在する頂点のみ)。ワースト字を選ぶために使う
     distance = np.linalg.norm(recon_real - true_real, axis=-1)
     return (distance * existence).sum(axis=1) / existence.sum(axis=1)
 
 
-def _draw_vertices(ax: plt.Axes, true_points: np.ndarray, recon_points: np.ndarray, title: str) -> None:
-    # SVGはy軸が下向きのため、他のレンダリングスクリプトと同様上向きに合わせて反転する
-    ax.scatter(true_points[:, 0], -true_points[:, 1], c="black", s=POINT_SIZE, label="true", zorder=3)
-    ax.scatter(recon_points[:, 0], -recon_points[:, 1], c="red", s=POINT_SIZE, marker="x", label="recon", zorder=3)
-    for true_p, recon_p in zip(true_points, recon_points):
-        ax.plot(
-            [true_p[0], recon_p[0]], [-true_p[1], -recon_p[1]], c="gray", linewidth=DISPLACEMENT_LINE_WIDTH, zorder=1
-        )
-    ax.set_title(title)
-    ax.set_aspect("equal")
-    ax.axis("off")
+def _worst_vertex_index(checkpoint: Checkpoint, batch: Batch, decoder_output: DecoderOutput) -> int:
+    true_real = to_real_scale(batch.vertices, checkpoint.vertex_mean, checkpoint.vertex_std)
+    recon_real = to_real_scale(decoder_output.vertex_features, checkpoint.vertex_mean, checkpoint.vertex_std)
+    existence = batch.vertex_existence.cpu().numpy().astype(bool)
+    return int(np.argmax(_sample_mean_vertex_distance(true_real, existence, recon_real)))
+
+
+def _stroke_curves(
+    start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence_mask: np.ndarray
+) -> list[tuple[complex, complex, complex]]:
+    # (始点, 終点, オフセット) -> (始点, 制御点, 終点)の2次ベジェ。制御点は弦(始点-終点)の中点をoffsetだけずらした点
+    curves = []
+    for (start_x, start_y), (end_x, end_y), (offset_x, offset_y), exists in zip(
+        start_points, end_points, offsets, existence_mask
+    ):
+        if not exists:
+            continue
+        start = complex(start_x, start_y)
+        end = complex(end_x, end_y)
+        control = (start + end) / 2 + complex(offset_x, offset_y)
+        curves.append((start, control, end))
+    return curves
 
 
 def main() -> None:
     device = select_device()
     checkpoint = load_checkpoint(device)
-    datasets = prepare_datasets()
+    batch = load_batch(prepare_datasets(), "val", device)
 
-    val_vertices_std, val_existence = (t.to(device) for t in datasets.val.tensors)
+    decoder_output = _decode(checkpoint, batch)
+    true_strokes = _true_strokes_real(checkpoint, batch)
+    reconstructed_strokes = _reconstructed_strokes_real(checkpoint, decoder_output)
+    stroke_existence_np = batch.stroke_existence.cpu().numpy().astype(bool)
 
-    with torch.no_grad():
-        # 再パラメータ化のサンプリングεによるランダム性を排除するため、muをそのままdecodeする
-        mu, _ = checkpoint.model.encode(flatten_input(val_vertices_std, val_existence))
-        vertices_recon, _ = unflatten_output(checkpoint.model.decode(mu), checkpoint.shape)
-
-    true_real = (val_vertices_std * checkpoint.std + checkpoint.mean).cpu().numpy()
-    recon_real = (vertices_recon * checkpoint.std + checkpoint.mean).cpu().numpy()
-    existence_np = val_existence.cpu().numpy().astype(bool)
-
-    worst_index = int(np.argmax(_sample_mean_distance(true_real, existence_np, recon_real)))
+    worst_index = _worst_vertex_index(checkpoint, batch, decoder_output)
     indices = [*TYPICAL_INDICES, worst_index]
 
-    fig, axes = plt.subplots(1, len(indices), figsize=(4 * len(indices), 4))
+    _, axes = plt.subplots(nrows=2, ncols=len(indices))
     for col, index in enumerate(indices):
-        mask = existence_np[index]
+        original_curves = _stroke_curves(
+            true_strokes.start[index], true_strokes.end[index], true_strokes.offsets[index],
+            stroke_existence_np[index],
+        )
+        reconstructed_curves = _stroke_curves(
+            reconstructed_strokes.start[index], reconstructed_strokes.end[index], reconstructed_strokes.offsets[index],
+            stroke_existence_np[index],
+        )
+        draw_curves(axes[0, col], original_curves)
         title = f"idx {index}" + (" (worst)" if index == worst_index else "")
-        _draw_vertices(axes[col], true_real[index][mask], recon_real[index][mask], title)
-    # 凡例をプロット領域の外(図の上部)に出す。内側に置くと点や線と被ることがあるため
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=2)
+        axes[0, col].set_title(title)
+        draw_curves(axes[1, col], reconstructed_curves)
+
     plt.show()
 
 

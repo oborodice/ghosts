@@ -46,21 +46,21 @@ $ uv run scripts/finetune_synthetic_stats.py
 # 重複スロットの検出)
 $ uv run scripts/evaluate_vae.py
 
-# 頂点のみの最小構成(頂点座標MSE+existence BCE+KL)でVAEを学習し、data/checkpoints/vae_v2.ptへ保存する
+# 頂点+ストローク全体(頂点座標MSE+existence BCE+ストロークのポインタ分類cross entropy+オフセットMSE+
+# existence BCE+KL)でVAEを学習し、data/checkpoints/vae_v2.ptへ保存する
 $ uv run scripts/train_vae_v2.py
 
 # 学習済みモデル(vae_v2.pt)の品質を数値で確認する
-# (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布(標準化スケール・実座標スケール)、
-# 丸暗記化していないかの確認、重複スロットの検出)
+# (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布(頂点の標準化スケール・実座標
+# スケール、ストロークのポインタ分類精度・オフセットMSE)、丸暗記していないかの確認、頂点の重複スロットの検出)
 $ uv run scripts/evaluate_vae_v2.py
 
-# 頂点のみの段階でハイパーパラメータ候補(KLの重み・warm-up速度・潜在次元数)を複数比較する。
-# 候補ごとにdata/checkpoints/vae_v2_sweep_<候補名>.ptへ保存し、beta非依存の指標(実座標スケールの
-# 頂点距離・dead次元数)で比較する
+# 頂点のみだった段階でハイパーパラメータ候補(KLの重み・warm-up速度・潜在次元数)を複数比較したスクリプト。
+# モデルの形状(頂点+ストローク対応)が変わったため現在は実行できない
 $ uv run scripts/sweep_vae_v2.py
 
-# validationサンプルの元データと再構成結果(model.decode(mu))を頂点の点群として並べて目視確認する。
-# 典型的な4字に加え、再構成誤差が最悪だった字も表示する
+# validationサンプルの元データと再構成結果(model.decode(mu))をストロークの曲線として並べて目視確認する。
+# 典型的な4字に加え、頂点の再構成誤差が最悪だった字も表示する
 $ uv run scripts/visualize_reconstruction_v2.py
 
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する。

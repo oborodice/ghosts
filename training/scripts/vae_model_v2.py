@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # 頂点+ストロークのデコーダは、今後(頂点のみ→ソフトポインタ→ハードポインタの順で)クエリ数や
 # 出力ヘッドの構成が段階的に増えていく前提のため、既存の学習パイプラインとは独立した専用モジュールとして
-# 定義する。現時点(頂点のみ)の内容自体は、スロット数・特徴量次元に依存しない既存のSelf-Attention
-# ベースのデコーダ設計をそのまま踏襲している
+# 定義する。現時点(ソフトポインタ)は、頂点トークン(座標+existence)とストロークトークン
+# (参照先頂点へのポインタ+オフセット+existence)の2種類を同じSelf-Attentionスタックに通す
 from pathlib import Path
 from typing import NamedTuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-# 頂点のみのこの段階では未チューニングで据え置いている値。再構成精度に問題があれば見直す
+# 未チューニングで据え置いている値。再構成精度に問題があれば見直す
 HIDDEN_DIMS: tuple[int, int] = (1024, 512)
 LATENT_DIM = 48
 
@@ -18,18 +19,30 @@ SLOT_ATTENTION_HEADS = 4
 SLOT_ATTENTION_LAYERS = 2
 SLOT_ATTENTION_FFN_DIM = 512
 
+VERTEX_TOKEN_TYPE = 0
+STROKE_TOKEN_TYPE = 1
+
 # 学習時の保存先であると同時に、将来の推論/生成スクリプトの読み込み先でもある
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "vae_v2.pt"
 
 
 class ModelShape(NamedTuple):
-    slot_count: int
-    feature_dim: int
+    vertex_count: int
+    vertex_feature_dim: int  # 座標(x, y)の次元数
+    stroke_count: int
+    stroke_feature_dim: int  # オフセット(offset_x, offset_y)の次元数。参照先頂点はポインタが担うため含めない
+
+    @property
+    def token_count(self) -> int:
+        return self.vertex_count + self.stroke_count
 
     @property
     def input_dim(self) -> int:
-        # 特徴量(slot_count × feature_dim)に、スロットごとのexistenceフラグ分を加える
-        return self.slot_count * self.feature_dim + self.slot_count
+        # この内訳(頂点の座標+existence、ストロークのone-hot×2+offset+existence)はflatten_inputの
+        # 連結順序と対応させる必要がある
+        vertex_dim = self.vertex_count * self.vertex_feature_dim + self.vertex_count
+        stroke_dim = self.stroke_count * (2 * self.vertex_count + self.stroke_feature_dim) + self.stroke_count
+        return vertex_dim + stroke_dim
 
 
 class SlotAttentionConfig(NamedTuple):
@@ -39,14 +52,28 @@ class SlotAttentionConfig(NamedTuple):
     ffn_dim: int
 
 
+class DecoderOutput(NamedTuple):
+    vertex_features: torch.Tensor  # (B, vertex_count, vertex_feature_dim)
+    vertex_existence_logits: torch.Tensor  # (B, vertex_count)
+    stroke_offsets: torch.Tensor  # (B, stroke_count, stroke_feature_dim)
+    stroke_existence_logits: torch.Tensor  # (B, stroke_count)
+    start_pointer_logits: torch.Tensor  # (B, stroke_count, vertex_count)
+    end_pointer_logits: torch.Tensor  # (B, stroke_count, vertex_count)
+    start_points: torch.Tensor  # (B, stroke_count, vertex_feature_dim) -- ポインタの重み付き平均で得た始点座標
+    end_points: torch.Tensor  # (B, stroke_count, vertex_feature_dim) -- 同上、終点座標
+
+
 class SlotAttentionDecoder(nn.Module):
     # 各スロットが他のスロットの出力を参照しながら特徴量を決められるよう、DETRの学習可能なobject queryに
     # 近い発想で、スロットごとの埋め込み+zの文脈をSelf-Attentionで相互参照させてから、スロットごとに
-    # 読み出す。出力はunflatten_outputとの互換のため従来通りのflat(features→existenceの順)な
-    # ベクトルにして返す
+    # 読み出す。頂点・ストロークの2種類のトークンを区別できるよう、スロット埋め込みにタイプ埋め込みを足す
     def __init__(self, shape: ModelShape, latent_dim: int, config: SlotAttentionConfig) -> None:
         super().__init__()
-        self.slot_queries = nn.Parameter(torch.randn(shape.slot_count, config.slot_dim))
+        self.shape = shape
+        self.slot_queries = nn.Parameter(torch.randn(shape.token_count, config.slot_dim))
+        self.type_embedding = nn.Embedding(2, config.slot_dim)  # 2種類 = 頂点(VERTEX_TOKEN_TYPE)・ストローク(STROKE_TOKEN_TYPE)
+        token_types = [VERTEX_TOKEN_TYPE] * shape.vertex_count + [STROKE_TOKEN_TYPE] * shape.stroke_count
+        self.register_buffer("token_types", torch.tensor(token_types))  # 学習対象ではないためbufferとして持つ
         self.z_to_context = nn.Linear(latent_dim, config.slot_dim)
         layer = nn.TransformerEncoderLayer(
             d_model=config.slot_dim,
@@ -55,18 +82,62 @@ class SlotAttentionDecoder(nn.Module):
             batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(layer, num_layers=config.num_layers)
-        self.feature_head = nn.Linear(config.slot_dim, shape.feature_dim)
-        self.existence_head = nn.Linear(config.slot_dim, 1)
 
-    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        self.vertex_feature_head = nn.Linear(config.slot_dim, shape.vertex_feature_dim)
+        self.vertex_existence_head = nn.Linear(config.slot_dim, 1)
+        self.stroke_offset_head = nn.Linear(config.slot_dim, shape.stroke_feature_dim)
+        self.stroke_existence_head = nn.Linear(config.slot_dim, 1)
+
+        # ストロークの始点・終点それぞれについて、頂点トークンへの注意(スケール済み内積)で参照先を選ぶ
+        self.pointer_key_head = nn.Linear(config.slot_dim, config.slot_dim)
+        self.pointer_start_query_head = nn.Linear(config.slot_dim, config.slot_dim)
+        self.pointer_end_query_head = nn.Linear(config.slot_dim, config.slot_dim)
+
+    def _pointer(
+        self, query_head: nn.Linear, stroke_slots: torch.Tensor, key: torch.Tensor, vertex_features: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # スケール済みドット積アテンション(Transformerの標準的な手法)で、ストロークトークンから
+        # 頂点トークンへの注意スコアを求める。scaleが無いと次元数が大きいほど内積の分散が増え、
+        # softmax後の分布が極端に鋭くなりすぎて勾配が消える
+        query = query_head(stroke_slots)  # (B, stroke_count, SLOT_DIM)
+        scale = self.pointer_key_head.out_features**0.5
+        logits = torch.bmm(query, key.transpose(1, 2)) / scale
+        points = torch.bmm(logits.softmax(dim=-1), vertex_features)
+        return logits, points
+
+    def forward(self, z: torch.Tensor) -> DecoderOutput:
         context = self.z_to_context(z).unsqueeze(1)  # (B, 1, SLOT_DIM)
-        # slot_queries: (1, slot_count, SLOT_DIM) + context: (B, 1, SLOT_DIM) はbroadcastで
-        # (B, slot_count, SLOT_DIM)になる(バッチ方向の明示的なexpandは不要)
-        slots = self.slot_queries.unsqueeze(0) + context
+        # slot_queries/type_embedding: (1, token_count, SLOT_DIM) + context: (B, 1, SLOT_DIM) はbroadcastで
+        # (B, token_count, SLOT_DIM)になる(バッチ方向の明示的なexpandは不要)
+        type_embeddings = self.type_embedding(self.token_types)
+        slots = self.slot_queries.unsqueeze(0) + type_embeddings.unsqueeze(0) + context
         slots = self.transformer(slots)
-        features_flat = self.feature_head(slots).flatten(1)
-        existence_logits = self.existence_head(slots).squeeze(-1)
-        return torch.cat([features_flat, existence_logits], dim=1)
+        vertex_slots, stroke_slots = slots[:, : self.shape.vertex_count], slots[:, self.shape.vertex_count :]
+
+        vertex_features = self.vertex_feature_head(vertex_slots)
+        vertex_existence_logits = self.vertex_existence_head(vertex_slots).squeeze(-1)
+        stroke_offsets = self.stroke_offset_head(stroke_slots)
+        stroke_existence_logits = self.stroke_existence_head(stroke_slots).squeeze(-1)
+
+        # 始点・終点で同じkey(頂点トークン)投影を共有する。頂点トークン自体はどちらのポインタから見ても同じであるため
+        pointer_key = self.pointer_key_head(vertex_slots)
+        start_logits, start_points = self._pointer(
+            self.pointer_start_query_head, stroke_slots, pointer_key, vertex_features
+        )
+        end_logits, end_points = self._pointer(
+            self.pointer_end_query_head, stroke_slots, pointer_key, vertex_features
+        )
+
+        return DecoderOutput(
+            vertex_features,
+            vertex_existence_logits,
+            stroke_offsets,
+            stroke_existence_logits,
+            start_logits,
+            end_logits,
+            start_points,
+            end_points,
+        )
 
 
 class VAE(nn.Module):
@@ -99,25 +170,37 @@ class VAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + std * eps
 
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
+    def decode(self, z: torch.Tensor) -> DecoderOutput:
         return self.decoder(z)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[DecoderOutput, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
 
 
-def flatten_input(features: torch.Tensor, existence: torch.Tensor) -> torch.Tensor:
-    # この並び順はunflatten_outputと対応させる必要がある
-    return torch.cat([features.flatten(1), existence], dim=1)
-
-
-def unflatten_output(flat: torch.Tensor, shape: ModelShape) -> tuple[torch.Tensor, torch.Tensor]:
-    # flatten_inputと同じ並び順(features→existence)を前提に分割する
-    features_dim = shape.slot_count * shape.feature_dim
-    features_flat, existence_logits = flat[:, :features_dim], flat[:, features_dim:]
-    return features_flat.view(-1, shape.slot_count, shape.feature_dim), existence_logits
+def flatten_input(
+    vertices: torch.Tensor,
+    vertex_existence: torch.Tensor,
+    stroke_vertex_indices: torch.Tensor,
+    stroke_offsets: torch.Tensor,
+    stroke_existence: torch.Tensor,
+    shape: ModelShape,
+) -> torch.Tensor:
+    # ストロークの参照先頂点(始点・終点)はカテゴリ変数のため、大小関係を暗示しないone-hotに展開する
+    start_onehot = F.one_hot(stroke_vertex_indices[..., 0], num_classes=shape.vertex_count).float()
+    end_onehot = F.one_hot(stroke_vertex_indices[..., 1], num_classes=shape.vertex_count).float()
+    return torch.cat(
+        [
+            vertices.flatten(1),
+            vertex_existence,
+            start_onehot.flatten(1),
+            end_onehot.flatten(1),
+            stroke_offsets.flatten(1),
+            stroke_existence,
+        ],
+        dim=1,
+    )
 
 
 def select_device() -> torch.device:
