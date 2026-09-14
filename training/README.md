@@ -27,6 +27,12 @@ $ uv run scripts/stroke_count_stats.py
 # 超える漢字は除外する)
 $ uv run scripts/extract_stroke_features.py
 
+# 各漢字のストロークを、接続されている端点同士をクリークでクラスタ化した「頂点」テーブルと、
+# 頂点ペアを参照する「ストローク」テーブルに変換し、data/stroke_features_v2.npzへ保存する
+# (同じ頂点を参照するストローク同士は必ず接続している、という保証をデータ構造として持たせるための
+# 表現。漢字以外のグリフ(ひらがな・カタカナ等)は除外する)
+$ uv run scripts/extract_stroke_features_v2.py
+
 # VAEを学習し、data/checkpoints/vae.ptへ保存する
 $ uv run scripts/train_vae.py
 
