@@ -59,6 +59,10 @@ $ uv run scripts/evaluate_vae_v2.py
 # 頂点距離・dead次元数)で比較する
 $ uv run scripts/sweep_vae_v2.py
 
+# validationサンプルの元データと再構成結果(model.decode(mu))を頂点の点群として並べて目視確認する。
+# 典型的な4字に加え、再構成誤差が最悪だった字も表示する
+$ uv run scripts/visualize_reconstruction_v2.py
+
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する。
 # 接続点周辺は文字全体の表示では崩れが見えづらいため、個別にズームインした図も表示する
 $ uv run scripts/visualize_reconstruction.py
