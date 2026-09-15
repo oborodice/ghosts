@@ -22,6 +22,7 @@ class LossComponents(NamedTuple):
     crossing_loss: torch.Tensor
     angle_naturalness_loss: torch.Tensor
     min_length_loss: torch.Tensor
+    vertex_repulsion_loss: torch.Tensor
 
 
 CROSSING_GATE_LOW = 0.08  # 交点パラメータt, uがこの範囲内ならストローク内部での交差とみなす(下限)。端点付近の接続点を除外する
@@ -42,6 +43,13 @@ MIN_LENGTH_LOSS_WEIGHT = 1.0  # 交差抑制損失・角度自然さ損失はい
 # ストロークを縮めて対象から外れること自体が損失を下げる手段になってしまう(交差抑制損失で実測済み)。
 # この抜け道は個々の損失の除外条件を直そうとするより、ストローク自体の縮小に独立してペナルティを
 # 与える方が両方の損失に共通して効く。既存コードに対応物が存在しない新規の損失のため暫定値とする
+
+VERTEX_REPULSION_THRESHOLD = 4.0  # 端点接続判定の閾値と同じ(extract_stroke_features_v2.CONNECTION_THRESHOLD)
+VERTEX_REPULSION_LOSS_WEIGHT = 1.0  # 交差抑制損失が「無関係な頂点同士を寄せる」ことで過剰接続
+# (3本以上合流)を悪化させる副作用への対応として追加。ablationで、頂点参照数ベースの代替案
+# (多重参照抑制損失)より明確に効果が高いことを確認済み(index単位ではなく座標単位でペナルティを
+# 与えるため、根本原因(座標単位での頂点の密集)に直接効く)。既存コードに対応物が存在しない
+# 新規の損失のため暫定値とする
 
 
 def pointer_loss(logits: torch.Tensor, target_index: torch.Tensor, stroke_existence: torch.Tensor) -> torch.Tensor:
@@ -200,6 +208,43 @@ def _compute_min_length_loss(
     return (penalty * existence).sum(dim=1).mean()
 
 
+def _pairwise_vertex_distance_real(
+    vertices: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
+) -> torch.Tensor:
+    # 全頂点ペアの実スケールでのユークリッド距離。(B, vertex_count, vertex_count)
+    vertices_real = vertices * vertex_std + vertex_mean
+    diff = vertices_real.unsqueeze(2) - vertices_real.unsqueeze(1)
+    return diff.norm(dim=-1)
+
+
+def _vertex_repulsion_pair_weights(
+    true_vertices: torch.Tensor, vertex_existence: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
+) -> torch.Tensor:
+    # 正解データで実際に離れている頂点ペアのみを対象にする(_crossing_pair_weightsと同じ設計:
+    # 正解側の判定は勾配不要のハード閾値で行う)。目・日のような格子状の部首で正解上も近い頂点ペアは
+    # ここで対象から除外されるため、正当な近さを壊すリスクを個別の閾値調整に頼らず構造的に避けられる
+    with torch.no_grad():
+        true_distance = _pairwise_vertex_distance_real(true_vertices, vertex_mean, vertex_std)
+        far_in_truth = (true_distance > VERTEX_REPULSION_THRESHOLD).float()
+    return off_diagonal_exist_pairs(vertex_existence) * far_in_truth
+
+
+def _compute_vertex_repulsion_loss(
+    true_vertices: torch.Tensor,
+    recon_vertices: torch.Tensor,
+    vertex_existence: torch.Tensor,
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
+) -> torch.Tensor:
+    # 正解で離れているはずの頂点ペアが、再構成でVERTEX_REPULSION_THRESHOLD未満まで近づいたら
+    # ペナルティを与える。crossing/angleと異なりストロークの端点(points)ではなく頂点スロット
+    # (vertex_features)自体を直接動かす損失であり、ポインタの選択を経由しないためdetachは不要
+    weights = _vertex_repulsion_pair_weights(true_vertices, vertex_existence, vertex_mean, vertex_std)
+    recon_distance = _pairwise_vertex_distance_real(recon_vertices, vertex_mean, vertex_std)
+    penalty = torch.clamp(VERTEX_REPULSION_THRESHOLD - recon_distance, min=0.0)
+    return (weights * penalty).sum(dim=(1, 2)).mean()
+
+
 def compute_loss(
     vertices: torch.Tensor,
     vertex_existence: torch.Tensor,
@@ -265,6 +310,9 @@ def compute_loss(
     losses["min_length_loss"] = _compute_min_length_loss(
         decoder_output.start_points, decoder_output.end_points, stroke_existence, vertex_mean, vertex_std
     )
+    losses["vertex_repulsion_loss"] = _compute_vertex_repulsion_loss(
+        vertices, decoder_output.vertex_features, vertex_existence, vertex_mean, vertex_std
+    )
 
     # ここに列挙のない損失(vertex_loss等)は暗黙的に重み1.0として扱う
     weights = {
@@ -272,6 +320,7 @@ def compute_loss(
         "crossing_loss": CROSSING_LOSS_WEIGHT,
         "angle_naturalness_loss": ANGLE_NATURALNESS_LOSS_WEIGHT,
         "min_length_loss": MIN_LENGTH_LOSS_WEIGHT,
+        "vertex_repulsion_loss": VERTEX_REPULSION_LOSS_WEIGHT,
     }
     total = sum(weights.get(name, 1.0) * value for name, value in losses.items())
     return LossComponents(total=total, **losses)

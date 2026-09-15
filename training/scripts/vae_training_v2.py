@@ -134,7 +134,7 @@ def train(
             f"Epoch {epoch}: train_loss={train_losses.total:.4f} val_loss={val_losses.total:.4f} beta={beta_epoch:.4f} | "
             f"train breakdown: vertex={train_losses.vertex_loss:.4f} kl={train_losses.kl_divergence:.4f} "
             f"crossing={train_losses.crossing_loss:.4f} angle={train_losses.angle_naturalness_loss:.4f} "
-            f"min_length={train_losses.min_length_loss:.4f}"
+            f"min_length={train_losses.min_length_loss:.4f} repulsion={train_losses.vertex_repulsion_loss:.4f}"
         )
 
         if val_losses.total < best_val_loss:
