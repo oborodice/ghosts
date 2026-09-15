@@ -8,9 +8,11 @@ import torch.nn.functional as F
 
 from vae_checkpoint_v2 import load_checkpoint
 from vae_data_v2 import prepare_datasets
+from vae_eval_common import existence_mask_from_logits
 from vae_eval_common_v2 import (
     ACTIVE_UNIT_THRESHOLD,
     Batch,
+    count_duplicate_slots,
     encode_batch,
     kl_per_dim as compute_kl_per_dim,
     load_batch,
@@ -20,12 +22,6 @@ from vae_losses_v2 import pointer_loss
 from vae_model_v2 import VAE, DecoderOutput, select_device
 
 WORST_SAMPLE_COUNT = 5
-DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ未満なら、デコーダが同じ頂点を複数スロットに重複して割り当てているとみなす閾値
-EXISTENCE_THRESHOLD = 0.5  # existenceの確率(Sigmoid(existence_logits))をbool判定に変換する閾値
-
-
-def _existence_mask_from_logits(existence_logits: torch.Tensor) -> np.ndarray:
-    return (torch.sigmoid(existence_logits) > EXISTENCE_THRESHOLD).cpu().numpy()
 
 
 def _print_loss_breakdown(batch: Batch, decoder_output: DecoderOutput, mu: torch.Tensor, logvar: torch.Tensor) -> None:
@@ -118,7 +114,7 @@ def _print_error_distribution(
     distance_real = vertex_distance_real(
         batch.vertices, batch.vertex_existence, decoder_output.vertex_features, vertex_mean, vertex_std
     )
-    existence_pred = _existence_mask_from_logits(decoder_output.vertex_existence_logits)
+    existence_pred = existence_mask_from_logits(decoder_output.vertex_existence_logits)
     existence_true = batch.vertex_existence.cpu().numpy().astype(bool)
     vertex_existence_accuracy = (existence_pred == existence_true).mean(axis=1)
 
@@ -181,26 +177,10 @@ def _print_memorization_check(
     print()
 
 
-def _count_duplicate_slots(vertex_features: torch.Tensor, existence_mask: torch.Tensor) -> np.ndarray:
-    # 各サンプルで、存在すると判定されたスロット同士の座標が極端に近いペアを数える
-    counts = []
-    for sample_idx in range(vertex_features.shape[0]):
-        active_indices = existence_mask[sample_idx].nonzero(as_tuple=True)[0]
-        positions = vertex_features[sample_idx, active_indices]
-        if len(active_indices) < 2:
-            counts.append(0)
-            continue
-        distance = torch.cdist(positions, positions)
-        distance.fill_diagonal_(float("inf"))
-        # 対称行列のためペア(i, j)と(j, i)の両方がカウントされる。2で割って実際のペア数に直す
-        counts.append((distance < DUPLICATE_POSITION_THRESHOLD).sum().item() // 2)
-    return np.array(counts)
-
-
 def _print_duplicate_slots(decoder_output: DecoderOutput) -> None:
     print("== 6. Duplicate slot check ==")
-    existence_mask = torch.from_numpy(_existence_mask_from_logits(decoder_output.vertex_existence_logits))
-    duplicate_counts = _count_duplicate_slots(decoder_output.vertex_features, existence_mask)
+    existence_mask = torch.from_numpy(existence_mask_from_logits(decoder_output.vertex_existence_logits))
+    duplicate_counts = count_duplicate_slots(decoder_output.vertex_features, existence_mask)
 
     print(f"Samples with >=1 near-duplicate slot pair: {(duplicate_counts > 0).sum()} / {len(duplicate_counts)}")
     print(f"Average near-duplicate pairs per sample: {duplicate_counts.mean():.4f}")

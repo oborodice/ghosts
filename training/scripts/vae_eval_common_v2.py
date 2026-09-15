@@ -7,9 +7,10 @@ import torch
 
 from vae_checkpoint_v2 import Checkpoint
 from vae_data_v2 import Datasets
-from vae_model_v2 import flatten_input
+from vae_model_v2 import DecoderOutput, flatten_input
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
+DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ未満なら、デコーダが同じ頂点を複数スロットに重複して割り当てているとみなす閾値
 
 
 class Batch(NamedTuple):
@@ -57,3 +58,68 @@ def vertex_distance_real(
     recon_real = to_real_scale(vertices_recon, mean, std)
     distance = np.linalg.norm(recon_real - true_real, axis=-1)
     return distance[existence.bool().cpu().numpy()]
+
+
+class RealScaleStrokes(NamedTuple):
+    start: np.ndarray  # (N, stroke_count, 2)
+    end: np.ndarray  # (N, stroke_count, 2)
+    offsets: np.ndarray  # (N, stroke_count, 2)
+
+
+def true_strokes_real(checkpoint: Checkpoint, batch: Batch) -> RealScaleStrokes:
+    vertices_real = to_real_scale(batch.vertices, checkpoint.vertex_mean, checkpoint.vertex_std)
+    start_index = batch.stroke_vertex_indices[..., 0:1].cpu().numpy()
+    end_index = batch.stroke_vertex_indices[..., 1:2].cpu().numpy()
+    offsets_real = to_real_scale(batch.stroke_offsets, checkpoint.stroke_offset_mean, checkpoint.stroke_offset_std)
+    return RealScaleStrokes(
+        np.take_along_axis(vertices_real, start_index, axis=1),
+        np.take_along_axis(vertices_real, end_index, axis=1),
+        offsets_real,
+    )
+
+
+def reconstructed_strokes_real(checkpoint: Checkpoint, decoder_output: DecoderOutput) -> RealScaleStrokes:
+    start_real = to_real_scale(decoder_output.start_points, checkpoint.vertex_mean, checkpoint.vertex_std)
+    end_real = to_real_scale(decoder_output.end_points, checkpoint.vertex_mean, checkpoint.vertex_std)
+    offsets_real = to_real_scale(
+        decoder_output.stroke_offsets, checkpoint.stroke_offset_mean, checkpoint.stroke_offset_std
+    )
+    return RealScaleStrokes(start_real, end_real, offsets_real)
+
+
+def stroke_curves(
+    start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence_mask: np.ndarray
+) -> list[tuple[complex, complex, complex]]:
+    # (始点, 終点, オフセット) -> (始点, 制御点, 終点)の2次ベジェ。制御点は弦(始点-終点)の中点をoffsetだけずらした点
+    curves = []
+    for (start_x, start_y), (end_x, end_y), (offset_x, offset_y), exists in zip(
+        start_points, end_points, offsets, existence_mask
+    ):
+        if not exists:
+            continue
+        start = complex(start_x, start_y)
+        end = complex(end_x, end_y)
+        control = (start + end) / 2 + complex(offset_x, offset_y)
+        curves.append((start, control, end))
+    return curves
+
+
+def duplicate_slot_pairs(positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # 1サンプル分の頂点座標(存在するスロットのみ)を受け取り、標準化後の座標間距離が
+    # DUPLICATE_POSITION_THRESHOLD未満のペア(i, j)を、positions内でのインデックスの組として返す
+    distance = torch.cdist(positions, positions)
+    return torch.triu(distance < DUPLICATE_POSITION_THRESHOLD, diagonal=1).nonzero(as_tuple=True)
+
+
+def count_duplicate_slots(vertex_features: torch.Tensor, existence_mask: torch.Tensor) -> np.ndarray:
+    # 各サンプルで、存在すると判定されたスロット同士の座標が極端に近いペアの数を数える
+    counts = []
+    for sample_idx in range(vertex_features.shape[0]):
+        active_indices = existence_mask[sample_idx].nonzero(as_tuple=True)[0]
+        if len(active_indices) < 2:
+            counts.append(0)
+            continue
+        positions = vertex_features[sample_idx, active_indices]
+        pair_rows, _ = duplicate_slot_pairs(positions)
+        counts.append(len(pair_rows))
+    return np.array(counts)
