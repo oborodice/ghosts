@@ -116,7 +116,10 @@ class SlotAttentionDecoder(nn.Module):
             # 推論時はGumbelノイズを乗せず、決定的なargmaxで選ぶ(ONNX変換後のargmax+gatherと一致させるため)
             selection = F.one_hot(logits.argmax(dim=-1), num_classes=logits.shape[-1]).to(logits.dtype)
 
-        points = torch.bmm(selection, vertex_features)
+        # selectionをdetachすることで、points(→start_points/end_points)を経由する下流の損失の勾配は
+        # vertex_featuresにのみ流れ、logitsには届かない。「どの頂点を参照するか」を学習させたい唯一の
+        # 損失(pointer_loss)は、この経路を経由せずlogitsを直接見て学習する
+        points = torch.bmm(selection.detach(), vertex_features)
         return logits, points
 
     def forward(self, z: torch.Tensor) -> DecoderOutput:

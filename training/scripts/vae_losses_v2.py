@@ -21,6 +21,7 @@ class LossComponents(NamedTuple):
     kl_divergence: torch.Tensor
     crossing_loss: torch.Tensor
     angle_naturalness_loss: torch.Tensor
+    min_length_loss: torch.Tensor
 
 
 CROSSING_GATE_LOW = 0.08  # 交点パラメータt, uがこの範囲内ならストローク内部での交差とみなす(下限)。端点付近の接続点を除外する
@@ -36,6 +37,11 @@ MIN_DIRECTION_NORM = 1.0  # atan2(角度)の勾配は方向ベクトルの実ス
 # (検証済み)。そのため、ノルムがこの値未満のストロークは「角度が実質定義できない退化ケース」とみなし、
 # atan2に渡す前に勾配的に無関係な固定方向へdetachして置き換え、角度自然さ損失の対象からも除外する
 # (実データの最短ストロークより十分小さく、崩壊した頂点座標のような病的なケースのみを除外する値)
+MIN_LENGTH_LOSS_WEIGHT = 1.0  # 交差抑制損失・角度自然さ損失はいずれも、MIN_DIRECTION_NORM未満のペア/
+# ストロークを損失の計算対象から除外する(退化ケースでの数値破綻を避けるため)。この除外は副作用として、
+# ストロークを縮めて対象から外れること自体が損失を下げる手段になってしまう(交差抑制損失で実測済み)。
+# この抜け道は個々の損失の除外条件を直そうとするより、ストローク自体の縮小に独立してペナルティを
+# 与える方が両方の損失に共通して効く。既存コードに対応物が存在しない新規の損失のため暫定値とする
 
 
 def pointer_loss(logits: torch.Tensor, target_index: torch.Tensor, stroke_existence: torch.Tensor) -> torch.Tensor:
@@ -58,10 +64,33 @@ def _true_stroke_points(
     return start, end
 
 
+def _direction_real(
+    start: torch.Tensor, end: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
+) -> torch.Tensor:
+    # atan2は実際のラジアン値でないと意味を持たないため、標準化された座標のまま角度を求めると、
+    # x軸・y軸で標準化の標準偏差が異なることにより縦横比が歪み、実際の見た目の角度とは異なる値になる。
+    # 実スケールに戻してから計算する(交差判定のアフィン不変性とは異なり、角度はアフィン変換で不変ではない)
+    start_real = start * vertex_std + vertex_mean
+    end_real = end * vertex_std + vertex_mean
+    return end_real - start_real
+
+
+def _well_defined_mask(direction: torch.Tensor) -> torch.Tensor:
+    # 実スケールでの方向ベクトルのノルムがMIN_DIRECTION_NORM未満のストロークは、始点・終点が実質同じ
+    # 場所にある退化したケースとみなす。角度(atan2の勾配爆発)だけでなく交差判定(崩壊したストローク集団は
+    # 実際の見た目によらずcrossing_strengthが小さい一定値になる、実測で確認済みの抜け道)も、この閾値で
+    # 退化ストロークを除外する必要がある
+    return (direction.norm(dim=-1) >= MIN_DIRECTION_NORM).float()
+
+
 def _pairwise_intersection_params(start: torch.Tensor, end: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # 各ストロークを弦(始点->終点)とみなし、全ペア(i, j)の交点パラメータt(iの弦上の位置)・
     # u(jの弦上の位置)をクラメルの公式(2元1次方程式)で解く。t, uはアフィン変換で不変
     # (2次元クロス積の分子・分母に現れるdetが約分される)ため、標準化スケールの座標をそのまま使ってよい
+    # 注意: 実際に描画される曲線の曲がり(offset_x/offset_y)はここでは一切考慮されない。そのため
+    # 交差抑制損失が交差を避けるために動かせる連続的なレバーは始点・終点の座標(頂点位置)のみであり、
+    # 「曲げて避ける」という選択肢は与えられていない。この非対称性により、本来無関係な2頂点を
+    # 近づけて弦同士を交差させないようにする(結果として過剰接続を助長する)という副作用が起こりうる
     direction = end - start  # (B, stroke_count, 2)
     d1 = direction.unsqueeze(2)  # (B, stroke_count, 1, 2) -- iの方向、jへブロードキャスト
     d2 = direction.unsqueeze(1)  # (B, 1, stroke_count, 2) -- jの方向、iへブロードキャスト
@@ -83,11 +112,16 @@ def _interior_gate(t: torch.Tensor) -> torch.Tensor:
     return low * high
 
 
-def _weighted_crossing_penalty(start: torch.Tensor, end: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    # 再構成側の交差の強さ(0〜1の連続値)を求め、ペアごとの重みを掛けて損失にする
+def _weighted_crossing_penalty(
+    start: torch.Tensor, end: torch.Tensor, weights: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
+) -> torch.Tensor:
+    # 再構成側の交差の強さ(0〜1の連続値)を求め、ペアごとの重みを掛けて損失にする。ペアの片方でも
+    # 方向ベクトルが退化していれば、そのペアは交差判定自体が意味をなさないため対象から除外する
     t, u = _pairwise_intersection_params(start, end)
     crossing_strength = _interior_gate(t) * _interior_gate(u)
-    return (weights * crossing_strength).sum(dim=(1, 2)).mean()
+    well_defined = _well_defined_mask(_direction_real(start, end, vertex_mean, vertex_std))
+    pair_well_defined = well_defined.unsqueeze(2) * well_defined.unsqueeze(1)
+    return (weights * pair_well_defined * crossing_strength).sum(dim=(1, 2)).mean()
 
 
 def _crossing_pair_weights(
@@ -110,31 +144,22 @@ def _compute_crossing_loss(
     recon_start: torch.Tensor,
     recon_end: torch.Tensor,
     existence: torch.Tensor,
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
 ) -> torch.Tensor:
     # 正解で交差していないペアについて、再構成側の交差の強さにペナルティを与える
     weights = _crossing_pair_weights(true_start, true_end, existence)
-    return _weighted_crossing_penalty(recon_start, recon_end, weights)
-
-
-def _direction_real(
-    start: torch.Tensor, end: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
-) -> torch.Tensor:
-    # atan2は実際のラジアン値でないと意味を持たないため、標準化された座標のまま角度を求めると、
-    # x軸・y軸で標準化の標準偏差が異なることにより縦横比が歪み、実際の見た目の角度とは異なる値になる。
-    # 実スケールに戻してから計算する(交差判定のアフィン不変性とは異なり、角度はアフィン変換で不変ではない)
-    start_real = start * vertex_std + vertex_mean
-    end_real = end * vertex_std + vertex_mean
-    return end_real - start_real
+    return _weighted_crossing_penalty(recon_start, recon_end, weights, vertex_mean, vertex_std)
 
 
 def _safe_angle(direction: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # ノルムがMIN_DIRECTION_NORM未満の退化した方向ベクトルは、atan2に渡す前に勾配的に無関係な
     # 固定方向(1, 0)へ置き換える(torch.whereのbackwardでは選ばれなかった側の勾配は伝播しないため、
     # 元のdirectionへは勾配が流れない)。戻り値のwell_definedで、そのストロークを損失計算からも除外する
-    well_defined = direction.norm(dim=-1) >= MIN_DIRECTION_NORM
-    safe_direction = torch.where(well_defined.unsqueeze(-1), direction, direction.new_tensor([1.0, 0.0]))
+    well_defined = _well_defined_mask(direction)
+    safe_direction = torch.where(well_defined.bool().unsqueeze(-1), direction, direction.new_tensor([1.0, 0.0]))
     angle = torch.atan2(safe_direction[..., 1], safe_direction[..., 0])
-    return angle, well_defined.float()
+    return angle, well_defined
 
 
 def _compute_angle_naturalness_loss(
@@ -159,6 +184,22 @@ def _compute_angle_naturalness_loss(
     return (penalty * mask).sum(dim=1).mean()
 
 
+def _compute_min_length_loss(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    existence: torch.Tensor,
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
+) -> torch.Tensor:
+    # ストロークの方向ベクトルの実スケールでのノルムがMIN_DIRECTION_NORM未満になるほどペナルティを
+    # 与える。MIN_DIRECTION_NORM以上では常に0(実データの最短ストロークより十分小さい値のため、
+    # 正当な短いストロークには影響しない)。退化域では他の損失(交差抑制・角度自然さ)がこのストロークを
+    # 対象から除外しており押し戻す力を持たないため、この損失だけがノルムを増やす方向に勾配を持つ
+    norm = _direction_real(start, end, vertex_mean, vertex_std).norm(dim=-1)
+    penalty = torch.clamp(MIN_DIRECTION_NORM - norm, min=0.0)
+    return (penalty * existence).sum(dim=1).mean()
+
+
 def compute_loss(
     vertices: torch.Tensor,
     vertex_existence: torch.Tensor,
@@ -175,9 +216,15 @@ def compute_loss(
 ) -> LossComponents:
     # 特徴量・スロット方向は和、バッチ方向は平均を取る(sum→batch mean)。
     # 要素方向で平均を取るとKLダイバージェンスに対して再構成損失が相対的に小さくなり、posterior collapseを起こしやすくなるため避ける
+    #
+    # lossesは重み乗算前の生の値(LossComponentsにそのまま格納する値)。個々の損失を追加するたびに
+    # (a)このdictへの1行(b)重みが1.0以外ならweightsへの1行、の2箇所を触るだけで済むようにするため、
+    # totalの合計式・LossComponentsへの詰め替えを手書きしない構成にしている
+    losses: dict[str, torch.Tensor] = {}
+
     vertex_mask = vertex_existence.unsqueeze(-1)
-    vertex_loss = (((decoder_output.vertex_features - vertices) ** 2) * vertex_mask).sum(dim=(1, 2)).mean()
-    vertex_existence_loss = (
+    losses["vertex_loss"] = (((decoder_output.vertex_features - vertices) ** 2) * vertex_mask).sum(dim=(1, 2)).mean()
+    losses["vertex_existence_loss"] = (
         F.binary_cross_entropy_with_logits(decoder_output.vertex_existence_logits, vertex_existence, reduction="none")
         .sum(dim=1)
         .mean()
@@ -185,18 +232,18 @@ def compute_loss(
 
     # ポインタの参照先はcross entropyで直接教師する(座標自体へのMSEは加えない)。座標の正しさは、
     # ポインタが正解頂点に集中しさえすれば頂点座標MSEを通じて間接的に保証される設計のため
-    start_pointer_loss = pointer_loss(
+    losses["start_pointer_loss"] = pointer_loss(
         decoder_output.start_pointer_logits, stroke_vertex_indices[..., 0], stroke_existence
     )
-    end_pointer_loss = pointer_loss(
+    losses["end_pointer_loss"] = pointer_loss(
         decoder_output.end_pointer_logits, stroke_vertex_indices[..., 1], stroke_existence
     )
 
     stroke_offset_mask = stroke_existence.unsqueeze(-1)
-    stroke_offset_loss = (
+    losses["stroke_offset_loss"] = (
         ((decoder_output.stroke_offsets - stroke_offsets) ** 2) * stroke_offset_mask
     ).sum(dim=(1, 2)).mean()
-    stroke_existence_loss = (
+    losses["stroke_existence_loss"] = (
         F.binary_cross_entropy_with_logits(
             decoder_output.stroke_existence_logits, stroke_existence, reduction="none"
         )
@@ -204,31 +251,27 @@ def compute_loss(
         .mean()
     )
 
-    kl_divergence = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
+    losses["kl_divergence"] = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
 
     true_start, true_end = _true_stroke_points(vertices, stroke_vertex_indices)
-    crossing_loss = _compute_crossing_loss(
-        true_start, true_end, decoder_output.start_points, decoder_output.end_points, stroke_existence
+    losses["crossing_loss"] = _compute_crossing_loss(
+        true_start, true_end, decoder_output.start_points, decoder_output.end_points, stroke_existence,
+        vertex_mean, vertex_std,
     )
-    angle_naturalness_loss = _compute_angle_naturalness_loss(
+    losses["angle_naturalness_loss"] = _compute_angle_naturalness_loss(
         true_start, true_end, decoder_output.start_points, decoder_output.end_points, stroke_existence,
         vertex_mean, vertex_std, angle_gmm,
     )
+    losses["min_length_loss"] = _compute_min_length_loss(
+        decoder_output.start_points, decoder_output.end_points, stroke_existence, vertex_mean, vertex_std
+    )
 
-    total = (
-        vertex_loss
-        + vertex_existence_loss
-        + start_pointer_loss
-        + end_pointer_loss
-        + stroke_offset_loss
-        + stroke_existence_loss
-        + beta * kl_divergence
-        + CROSSING_LOSS_WEIGHT * crossing_loss
-        + ANGLE_NATURALNESS_LOSS_WEIGHT * angle_naturalness_loss
-    )
-    # kl_divergence同様、crossing_loss・angle_naturalness_lossも重み乗算前の生の値を残す
-    # (重み(CROSSING_LOSS_WEIGHT等)は呼び出し元ではなくこのファイル内で完結する値のため)
-    return LossComponents(
-        total, vertex_loss, vertex_existence_loss, start_pointer_loss, end_pointer_loss,
-        stroke_offset_loss, stroke_existence_loss, kl_divergence, crossing_loss, angle_naturalness_loss,
-    )
+    # ここに列挙のない損失(vertex_loss等)は暗黙的に重み1.0として扱う
+    weights = {
+        "kl_divergence": beta,
+        "crossing_loss": CROSSING_LOSS_WEIGHT,
+        "angle_naturalness_loss": ANGLE_NATURALNESS_LOSS_WEIGHT,
+        "min_length_loss": MIN_LENGTH_LOSS_WEIGHT,
+    }
+    total = sum(weights.get(name, 1.0) * value for name, value in losses.items())
+    return LossComponents(total=total, **losses)
