@@ -147,6 +147,15 @@ def main() -> None:
     true_existence = train_batch.stroke_existence.cpu().numpy().astype(bool)
     _report("real data", true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence)
 
+    with torch.no_grad():
+        recon_output = checkpoint.model.decode(mu_real)
+    recon_strokes = reconstructed_strokes_real(checkpoint, recon_output)
+    recon_existence = existence_mask_from_logits(recon_output.stroke_existence_logits)
+    _report(
+        "reconstruction (encode -> decode(mu))",
+        recon_strokes.start, recon_strokes.end, recon_strokes.offsets, recon_existence,
+    )
+
     torch.manual_seed(SEED)
     z_raw = torch.randn(SAMPLE_COUNT, checkpoint.latent_dim, device=device)
     with torch.no_grad():
