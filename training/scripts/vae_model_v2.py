@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # 頂点+ストロークのデコーダは、今後(頂点のみ→ソフトポインタ→ハードポインタの順で)クエリ数や
 # 出力ヘッドの構成が段階的に増えていく前提のため、既存の学習パイプラインとは独立した専用モジュールとして
-# 定義する。現時点(ソフトポインタ)は、頂点トークン(座標+existence)とストロークトークン
-# (参照先頂点へのポインタ+オフセット+existence)の2種類を同じSelf-Attentionスタックに通す
+# 定義する。現時点(ハードポインタ)は、頂点トークン(座標+existence)とストロークトークン
+# (参照先頂点へのポインタ+オフセット+existence)の2種類を同じSelf-Attentionスタックに通す。
+# ポインタは学習時のみStraight-Through Gumbel-Softmaxで離散化し、推論時(model.eval())はノイズ無しの
+# argmaxにする(ONNX変換後のargmax+gatherと一致させるため)
 from pathlib import Path
 from typing import NamedTuple
 
@@ -59,7 +61,7 @@ class DecoderOutput(NamedTuple):
     stroke_existence_logits: torch.Tensor  # (B, stroke_count)
     start_pointer_logits: torch.Tensor  # (B, stroke_count, vertex_count)
     end_pointer_logits: torch.Tensor  # (B, stroke_count, vertex_count)
-    start_points: torch.Tensor  # (B, stroke_count, vertex_feature_dim) -- ポインタの重み付き平均で得た始点座標
+    start_points: torch.Tensor  # (B, stroke_count, vertex_feature_dim) -- ポインタが選んだ頂点の座標(one-hot選択)
     end_points: torch.Tensor  # (B, stroke_count, vertex_feature_dim) -- 同上、終点座標
 
 
@@ -67,9 +69,12 @@ class SlotAttentionDecoder(nn.Module):
     # 各スロットが他のスロットの出力を参照しながら特徴量を決められるよう、DETRの学習可能なobject queryに
     # 近い発想で、スロットごとの埋め込み+zの文脈をSelf-Attentionで相互参照させてから、スロットごとに
     # 読み出す。頂点・ストロークの2種類のトークンを区別できるよう、スロット埋め込みにタイプ埋め込みを足す
-    def __init__(self, shape: ModelShape, latent_dim: int, config: SlotAttentionConfig) -> None:
+    def __init__(
+        self, shape: ModelShape, latent_dim: int, config: SlotAttentionConfig, gumbel_temperature: float
+    ) -> None:
         super().__init__()
         self.shape = shape
+        self.gumbel_temperature = gumbel_temperature
         self.slot_queries = nn.Parameter(torch.randn(shape.token_count, config.slot_dim))
         self.type_embedding = nn.Embedding(2, config.slot_dim)  # 2種類 = 頂点(VERTEX_TOKEN_TYPE)・ストローク(STROKE_TOKEN_TYPE)
         token_types = [VERTEX_TOKEN_TYPE] * shape.vertex_count + [STROKE_TOKEN_TYPE] * shape.stroke_count
@@ -102,7 +107,16 @@ class SlotAttentionDecoder(nn.Module):
         query = query_head(stroke_slots)  # (B, stroke_count, SLOT_DIM)
         scale = self.pointer_key_head.out_features**0.5
         logits = torch.bmm(query, key.transpose(1, 2)) / scale
-        points = torch.bmm(logits.softmax(dim=-1), vertex_features)
+
+        if self.training:
+            # Straight-Through Gumbel-Softmax: 前向き計算はone-hot(ハード)だが、逆伝播は
+            # ハード化前のsoftmax分布を通じて勾配が流れる
+            selection = F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=True, dim=-1)
+        else:
+            # 推論時はGumbelノイズを乗せず、決定的なargmaxで選ぶ(ONNX変換後のargmax+gatherと一致させるため)
+            selection = F.one_hot(logits.argmax(dim=-1), num_classes=logits.shape[-1]).to(logits.dtype)
+
+        points = torch.bmm(selection, vertex_features)
         return logits, points
 
     def forward(self, z: torch.Tensor) -> DecoderOutput:
@@ -147,6 +161,7 @@ class VAE(nn.Module):
         hidden_dims: tuple[int, int],
         latent_dim: int,
         slot_attention_config: SlotAttentionConfig,
+        gumbel_temperature: float,
     ) -> None:
         super().__init__()
         hidden1, hidden2 = hidden_dims
@@ -158,7 +173,7 @@ class VAE(nn.Module):
         )
         self.fc_mu = nn.Linear(hidden2, latent_dim)
         self.fc_logvar = nn.Linear(hidden2, latent_dim)
-        self.decoder = SlotAttentionDecoder(shape, latent_dim, slot_attention_config)
+        self.decoder = SlotAttentionDecoder(shape, latent_dim, slot_attention_config, gumbel_temperature)
 
     def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         hidden = self.encoder(x)

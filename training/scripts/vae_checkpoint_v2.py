@@ -12,6 +12,7 @@ class Checkpoint(NamedTuple):
     shape: ModelShape
     hidden_dims: tuple[int, int]
     slot_attention_config: SlotAttentionConfig
+    gumbel_temperature: float
     vertex_mean: torch.Tensor
     vertex_std: torch.Tensor
     stroke_offset_mean: torch.Tensor
@@ -25,7 +26,10 @@ def load_checkpoint(device: torch.device, checkpoint_path: Path = CHECKPOINT_PAT
     checkpoint = torch.load(checkpoint_path, map_location=device)
     shape = ModelShape(*checkpoint["shape"])
     slot_attention_config = SlotAttentionConfig(*checkpoint["slot_attention_config"])
-    model = VAE(shape, checkpoint["hidden_dims"], checkpoint["latent_dim"], slot_attention_config).to(device)
+    gumbel_temperature = checkpoint["gumbel_temperature"]
+    model = VAE(
+        shape, checkpoint["hidden_dims"], checkpoint["latent_dim"], slot_attention_config, gumbel_temperature
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return Checkpoint(
@@ -33,6 +37,7 @@ def load_checkpoint(device: torch.device, checkpoint_path: Path = CHECKPOINT_PAT
         shape,
         checkpoint["hidden_dims"],
         slot_attention_config,
+        gumbel_temperature,
         checkpoint["vertex_mean"].to(device),
         checkpoint["vertex_std"].to(device),
         checkpoint["stroke_offset_mean"].to(device),
@@ -47,6 +52,7 @@ def save_checkpoint(
     hidden_dims: tuple[int, int],
     latent_dim: int,
     slot_attention_config: SlotAttentionConfig,
+    gumbel_temperature: float,
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
     stroke_offset_mean: torch.Tensor,
@@ -66,6 +72,7 @@ def save_checkpoint(
             # torch.loadのweights_only=True(デフォルト)はNamedTupleサブクラスを許可しないため、
             # プレーンなtupleとして保存する
             "slot_attention_config": tuple(slot_attention_config),
+            "gumbel_temperature": gumbel_temperature,
             "shape": tuple(shape),
             "vertex_mean": vertex_mean.detach().cpu(),
             "vertex_std": vertex_std.detach().cpu(),

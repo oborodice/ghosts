@@ -27,6 +27,7 @@ SLOT_ATTENTION_CONFIG = SlotAttentionConfig(
 BETA = 0.25  # posterior collapse(潜在次元の大部分が死んで再構成精度が落ちる現象)を避けるため、
 # 複数候補を比較して選んだ暫定値(正式な最適値探しは今後別途行う)
 KL_ANNEALING_EPOCHS = 60  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)
+GUMBEL_TEMPERATURE = 1.0  # Straight-Through Gumbel-Softmaxの温度。標準的な既定値を暫定採用(正式な調整は今後別途行う)
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
 PATIENCE = 20
@@ -82,6 +83,7 @@ def train(
     hidden_dims: tuple[int, int],
     latent_dim: int,
     slot_attention_config: SlotAttentionConfig,
+    gumbel_temperature: float,
     beta: float,
     kl_annealing_epochs: int,
     checkpoint_path: Path,
@@ -100,7 +102,7 @@ def train(
     )
     val_loader = DataLoader(datasets.val, batch_size=batch_size, shuffle=False)
 
-    model = VAE(datasets.shape, hidden_dims, latent_dim, slot_attention_config).to(device)
+    model = VAE(datasets.shape, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     vertex_mean = torch.tensor(datasets.vertex_mean, dtype=torch.float32, device=device)
     vertex_std = torch.tensor(datasets.vertex_std, dtype=torch.float32, device=device)
@@ -121,7 +123,7 @@ def train(
             best_val_loss = val_loss
             epochs_without_improvement = 0
             save_checkpoint(
-                model, datasets.shape, hidden_dims, latent_dim, slot_attention_config,
+                model, datasets.shape, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature,
                 vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std, checkpoint_path,
             )
         else:
