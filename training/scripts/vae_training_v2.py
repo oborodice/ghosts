@@ -8,7 +8,8 @@ from torch.utils.data import DataLoader
 
 from vae_checkpoint_v2 import save_checkpoint
 from vae_data_v2 import SEED, Datasets
-from vae_losses_v2 import compute_loss
+from vae_losses import AngleGMM, build_angle_gmm
+from vae_losses_v2 import LossComponents, compute_loss
 from vae_model_v2 import (
     SLOT_ATTENTION_FFN_DIM,
     SLOT_ATTENTION_HEADS,
@@ -46,12 +47,15 @@ def _run_epoch(
     device: torch.device,
     optimizer: optim.Optimizer | None,
     beta: float,
-) -> float:
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
+    angle_gmm: AngleGMM,
+) -> LossComponents:
     # optimizerがNoneのとき(validation時)は重み更新を行わないeval modeとして扱う
     is_training = optimizer is not None
     model.train(is_training)
 
-    total_loss = 0.0
+    totals = {field: 0.0 for field in LossComponents._fields}
     with torch.set_grad_enabled(is_training):
         for batch in loader:
             vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence = (
@@ -64,16 +68,20 @@ def _run_epoch(
             decoder_output, mu, logvar = model(x)
             loss = compute_loss(
                 vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence,
-                decoder_output, mu, logvar, beta,
+                decoder_output, mu, logvar, beta, vertex_mean, vertex_std, angle_gmm,
             )
 
             if optimizer is not None:
                 optimizer.zero_grad()
-                loss.backward()
+                loss.total.backward()
                 optimizer.step()
 
-            total_loss += loss.item() * vertices.size(0)
-    return total_loss / len(loader.dataset)
+            batch_size = vertices.size(0)
+            for field in LossComponents._fields:
+                totals[field] += getattr(loss, field).item() * batch_size
+
+    dataset_size = len(loader.dataset)
+    return LossComponents(**{field: totals[field] / dataset_size for field in LossComponents._fields})
 
 
 def train(
@@ -108,19 +116,28 @@ def train(
     vertex_std = torch.tensor(datasets.vertex_std, dtype=torch.float32, device=device)
     stroke_offset_mean = torch.tensor(datasets.stroke_offset_mean, dtype=torch.float32, device=device)
     stroke_offset_std = torch.tensor(datasets.stroke_offset_std, dtype=torch.float32, device=device)
+    angle_gmm = build_angle_gmm(datasets.angle_gmm_params, device)
 
     best_val_loss = float("inf")
     epochs_without_improvement = 0
 
     for epoch in range(1, max_epochs + 1):
         beta_epoch = _compute_beta(epoch, beta, kl_annealing_epochs)
-        train_loss = _run_epoch(train_loader, model, datasets.shape, device, optimizer, beta_epoch)
+        train_losses = _run_epoch(
+            train_loader, model, datasets.shape, device, optimizer, beta_epoch, vertex_mean, vertex_std, angle_gmm
+        )
         # 早期終了・チェックポイント選定はannealing中でも比較可能にするため、常に最終的なβ(=beta)で評価する
-        val_loss = _run_epoch(val_loader, model, datasets.shape, device, None, beta)
-        print(f"Epoch {epoch}: train_loss={train_loss:.4f} val_loss={val_loss:.4f} beta={beta_epoch:.4f}")
+        val_losses = _run_epoch(
+            val_loader, model, datasets.shape, device, None, beta, vertex_mean, vertex_std, angle_gmm
+        )
+        print(
+            f"Epoch {epoch}: train_loss={train_losses.total:.4f} val_loss={val_losses.total:.4f} beta={beta_epoch:.4f} | "
+            f"train breakdown: vertex={train_losses.vertex_loss:.4f} kl={train_losses.kl_divergence:.4f} "
+            f"crossing={train_losses.crossing_loss:.4f} angle={train_losses.angle_naturalness_loss:.4f}"
+        )
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_losses.total < best_val_loss:
+            best_val_loss = val_losses.total
             epochs_without_improvement = 0
             save_checkpoint(
                 model, datasets.shape, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature,
