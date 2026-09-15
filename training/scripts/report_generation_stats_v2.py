@@ -2,7 +2,7 @@
 # 混ぜ合わせ生成(attract_to_latent_prior)時の孤立率・3本以上合流・交差を、
 # report_generation_stats.pyと揃えた方法で数値化する診断ツール。VAEの学習・推論(生成)には
 # 一切組み込まれない、独立した事後診断用のスクリプト。あわせて、重複スロットが3本以上合流の
-# カウントを狂わせていないかも確認する
+# カウントを狂わせていないか、およびポインタの構造的な破綻(自己ループ・幽霊参照)の頻度も確認する
 import numpy as np
 import torch
 
@@ -91,6 +91,44 @@ def _report(
     print()
 
 
+def _pointer_targets(logits: torch.Tensor) -> np.ndarray:
+    return logits.argmax(dim=-1).cpu().numpy()
+
+
+def _self_loop_rate(start_index: np.ndarray, end_index: np.ndarray, existence: np.ndarray) -> float:
+    # v2のポインタ機構(始点・終点を独立に離散選択する)固有の失敗モード。正解データでは
+    # 始点・終点は必ず異なる頂点を指すため、両者が同じ頂点を指すことは長さ0の自己参照ストロークを意味する
+    self_loop = (start_index == end_index) & existence
+    return 100 * self_loop.sum() / existence.sum() if existence.sum() else float("nan")
+
+
+def _phantom_reference_rate(
+    pointer_index: np.ndarray, vertex_existence_mask: np.ndarray, existence: np.ndarray
+) -> float:
+    # ストロークのポインタが指す先の頂点が、その頂点自身のexistenceでは「存在しない」と
+    # 判定されているケース(幽霊参照)の頻度
+    target_exists = np.take_along_axis(vertex_existence_mask, pointer_index, axis=1)
+    phantom = ~target_exists & existence
+    return 100 * phantom.sum() / existence.sum() if existence.sum() else float("nan")
+
+
+def _report_pointer_integrity(
+    label: str,
+    start_index: np.ndarray,
+    end_index: np.ndarray,
+    vertex_existence_mask: np.ndarray,
+    existence: np.ndarray,
+) -> None:
+    print(f"--- {label}: pointer integrity ---")
+    print(f"self_loop_rate = {_self_loop_rate(start_index, end_index, existence):.2f}%")
+    print(
+        f"phantom_reference_rate (start/end) = "
+        f"{_phantom_reference_rate(start_index, vertex_existence_mask, existence):.2f}% / "
+        f"{_phantom_reference_rate(end_index, vertex_existence_mask, existence):.2f}%"
+    )
+    print()
+
+
 def _duplicate_pair_real_distances(
     vertex_features: torch.Tensor, existence_mask: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
 ) -> np.ndarray:
@@ -145,7 +183,13 @@ def main() -> None:
 
     true_strokes = true_strokes_real(checkpoint, train_batch)
     true_existence = train_batch.stroke_existence.cpu().numpy().astype(bool)
+    true_vertex_existence_mask = train_batch.vertex_existence.cpu().numpy().astype(bool)
+    true_start_index = train_batch.stroke_vertex_indices[..., 0].cpu().numpy()
+    true_end_index = train_batch.stroke_vertex_indices[..., 1].cpu().numpy()
     _report("real data", true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence)
+    _report_pointer_integrity(
+        "real data", true_start_index, true_end_index, true_vertex_existence_mask, true_existence
+    )
 
     with torch.no_grad():
         recon_output = checkpoint.model.decode(mu_real)
@@ -154,6 +198,13 @@ def main() -> None:
     _report(
         "reconstruction (encode -> decode(mu))",
         recon_strokes.start, recon_strokes.end, recon_strokes.offsets, recon_existence,
+    )
+    _report_pointer_integrity(
+        "reconstruction (encode -> decode(mu))",
+        _pointer_targets(recon_output.start_pointer_logits),
+        _pointer_targets(recon_output.end_pointer_logits),
+        existence_mask_from_logits(recon_output.vertex_existence_logits),
+        recon_existence,
     )
 
     torch.manual_seed(SEED)
@@ -167,6 +218,13 @@ def main() -> None:
     _report(
         "generated (current production checkpoint)",
         generated_strokes.start, generated_strokes.end, generated_strokes.offsets, generated_existence,
+    )
+    _report_pointer_integrity(
+        "generated (current production checkpoint)",
+        _pointer_targets(decoder_output.start_pointer_logits),
+        _pointer_targets(decoder_output.end_pointer_logits),
+        existence_mask_from_logits(decoder_output.vertex_existence_logits),
+        generated_existence,
     )
 
     _print_duplicate_slot_check(
