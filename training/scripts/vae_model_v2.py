@@ -122,13 +122,20 @@ class SlotAttentionDecoder(nn.Module):
         points = torch.bmm(selection.detach(), vertex_features)
         return logits, points
 
-    def forward(self, z: torch.Tensor) -> DecoderOutput:
+    def forward(self, z: torch.Tensor, detach_slots: bool = False) -> DecoderOutput:
         context = self.z_to_context(z).unsqueeze(1)  # (B, 1, SLOT_DIM)
         # slot_queries/type_embedding: (1, token_count, SLOT_DIM) + context: (B, 1, SLOT_DIM) はbroadcastで
         # (B, token_count, SLOT_DIM)になる(バッチ方向の明示的なexpandは不要)
         type_embeddings = self.type_embedding(self.token_types)
         slots = self.slot_queries.unsqueeze(0) + type_embeddings.unsqueeze(0) + context
         slots = self.transformer(slots)
+        # detach_slotsは、vertex_features・pointer_key等の複数の出力ヘッドが共有するこの
+        # self-attention出力を経由して、片方のヘッドだけを教師したい損失の勾配がもう片方の
+        # ヘッドの入力(=Transformer本体)まで意図せず遡ってしまうのを防ぐためのオプション。
+        # 各ヘッド自身の重みには引き続き勾配が届く(入力をdetachしても、そこから先の
+        # 線形変換自体は通常通り学習される)。既定はFalse(全ヘッドを通常通り共同学習する)
+        if detach_slots:
+            slots = slots.detach()
         vertex_slots, stroke_slots = slots[:, : self.shape.vertex_count], slots[:, self.shape.vertex_count :]
 
         vertex_features = self.vertex_feature_head(vertex_slots)
@@ -188,8 +195,8 @@ class VAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + std * eps
 
-    def decode(self, z: torch.Tensor) -> DecoderOutput:
-        return self.decoder(z)
+    def decode(self, z: torch.Tensor, detach_slots: bool = False) -> DecoderOutput:
+        return self.decoder(z, detach_slots=detach_slots)
 
     def forward(self, x: torch.Tensor) -> tuple[DecoderOutput, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
