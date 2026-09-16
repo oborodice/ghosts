@@ -50,6 +50,8 @@ def _forward_and_compute_loss(
     beta: float,
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
     angle_gmm: AngleGMM,
 ) -> tuple[torch.Tensor, LossComponents, SyntheticLossComponents]:
     # 1バッチ分のforward計算と、再構成側(LossComponents)・混ぜ合わせz側(SyntheticLossComponents)
@@ -61,7 +63,7 @@ def _forward_and_compute_loss(
     decoder_output, mu, logvar = model(x)
     recon_loss = compute_loss(
         vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence,
-        decoder_output, mu, logvar, beta, vertex_mean, vertex_std, angle_gmm,
+        decoder_output, mu, logvar, beta, vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std, angle_gmm,
     )
     synthetic_loss = compute_synthetic_loss(model, mu)
     total = recon_loss.total + synthetic_loss.total
@@ -86,6 +88,8 @@ def _run_epoch(
     beta: float,
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
     angle_gmm: AngleGMM,
 ) -> tuple[LossComponents, SyntheticLossComponents]:
     # optimizerがNoneのとき(validation時)は重み更新を行わないeval modeとして扱う
@@ -97,7 +101,8 @@ def _run_epoch(
     with torch.set_grad_enabled(is_training):
         for batch in loader:
             total, recon_loss, synthetic_loss = _forward_and_compute_loss(
-                model, batch, shape, device, beta, vertex_mean, vertex_std, angle_gmm
+                model, batch, shape, device, beta, vertex_mean, vertex_std,
+                stroke_offset_mean, stroke_offset_std, angle_gmm,
             )
 
             if optimizer is not None:
@@ -192,12 +197,12 @@ def train(
         beta_epoch = _compute_beta(epoch, beta, kl_annealing_epochs)
         train_losses, train_synthetic = _run_epoch(
             state.train_loader, state.model, datasets.shape, device, state.optimizer, beta_epoch,
-            state.vertex_mean, state.vertex_std, state.angle_gmm,
+            state.vertex_mean, state.vertex_std, state.stroke_offset_mean, state.stroke_offset_std, state.angle_gmm,
         )
         # 早期終了・チェックポイント選定はannealing中でも比較可能にするため、常に最終的なβ(=beta)で評価する
         val_losses, val_synthetic = _run_epoch(
             state.val_loader, state.model, datasets.shape, device, None, beta,
-            state.vertex_mean, state.vertex_std, state.angle_gmm,
+            state.vertex_mean, state.vertex_std, state.stroke_offset_mean, state.stroke_offset_std, state.angle_gmm,
         )
         # 学習対象・early stopping判定に使う実際の合計は、再構成側・混ぜ合わせz側それぞれのtotalの和
         train_total = train_losses.total + train_synthetic.total

@@ -91,22 +91,21 @@ def _well_defined_mask(direction: torch.Tensor) -> torch.Tensor:
     return (direction.norm(dim=-1) >= MIN_DIRECTION_NORM).float()
 
 
-def _pairwise_intersection_params(start: torch.Tensor, end: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    # 各ストロークを弦(始点->終点)とみなし、全ペア(i, j)の交点パラメータt(iの弦上の位置)・
-    # u(jの弦上の位置)をクラメルの公式(2元1次方程式)で解く。t, uはアフィン変換で不変
-    # (2次元クロス積の分子・分母に現れるdetが約分される)ため、標準化スケールの座標をそのまま使ってよい
-    # 注意: 実際に描画される曲線の曲がり(offset_x/offset_y)はここでは一切考慮されない。そのため
-    # 交差抑制損失が交差を避けるために動かせる連続的なレバーは始点・終点の座標(頂点位置)のみであり、
-    # 「曲げて避ける」という選択肢は与えられていない。この非対称性により、本来無関係な2頂点を
-    # 近づけて弦同士を交差させないようにする(結果として過剰接続を助長する)という副作用が起こりうる
-    direction = end - start  # (B, stroke_count, 2)
-    d1 = direction.unsqueeze(2)  # (B, stroke_count, 1, 2) -- iの方向、jへブロードキャスト
-    d2 = direction.unsqueeze(1)  # (B, 1, stroke_count, 2) -- jの方向、iへブロードキャスト
+def _pairwise_segment_intersection_params(
+    start1: torch.Tensor, end1: torch.Tensor, start2: torch.Tensor, end2: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # 線分1(start1->end1、ストロークiの区間)と線分2(start2->end2、ストロークjの区間)の
+    # 全ペア(i, j)について、交点パラメータt(線分1上の位置)・u(線分2上の位置)をクラメルの公式
+    # (2元1次方程式)で解く。t, uはアフィン変換で不変(2次元クロス積の分子・分母に現れるdetが
+    # 約分される)ため、start1/end1とstart2/end2が同じアフィン変換後の空間(標準化頂点座標空間)に
+    # あれば、標準化スケールの座標をそのまま使ってよい
+    d1 = (end1 - start1).unsqueeze(2)  # (B, stroke_count, 1, 2) -- iの方向、jへブロードキャスト
+    d2 = (end2 - start2).unsqueeze(1)  # (B, 1, stroke_count, 2) -- jの方向、iへブロードキャスト
     denom = d1[..., 0] * d2[..., 1] - d1[..., 1] * d2[..., 0]
-    # 平行な弦(denom≈0)はt, uが発散するが、_interior_gateで範囲外に押し出されるため実害はない
+    # 平行な線分(denom≈0)はt, uが発散するが、_interior_gateで範囲外に押し出されるため実害はない
     denom = torch.where(denom.abs() < CROSSING_DENOM_EPSILON, torch.full_like(denom, CROSSING_DENOM_EPSILON), denom)
 
-    diff = start.unsqueeze(1) - start.unsqueeze(2)  # p3 - p1, (B, stroke_count(i), stroke_count(j), 2)
+    diff = start2.unsqueeze(1) - start1.unsqueeze(2)  # p3 - p1, (B, stroke_count(i), stroke_count(j), 2)
     t = (diff[..., 0] * d2[..., 1] - diff[..., 1] * d2[..., 0]) / denom
     u = (diff[..., 0] * d1[..., 1] - diff[..., 1] * d1[..., 0]) / denom
     return t, u
@@ -120,44 +119,127 @@ def _interior_gate(t: torch.Tensor) -> torch.Tensor:
     return low * high
 
 
-def _weighted_crossing_penalty(
-    start: torch.Tensor, end: torch.Tensor, weights: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
+def _fold_point(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    offset: torch.Tensor,
+    vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
 ) -> torch.Tensor:
-    # 再構成側の交差の強さ(0〜1の連続値)を求め、ペアごとの重みを掛けて損失にする。ペアの片方でも
-    # 方向ベクトルが退化していれば、そのペアは交差判定自体が意味をなさないため対象から除外する
-    t, u = _pairwise_intersection_params(start, end)
-    crossing_strength = _interior_gate(t) * _interior_gate(u)
-    well_defined = _well_defined_mask(_direction_real(start, end, vertex_mean, vertex_std))
-    pair_well_defined = well_defined.unsqueeze(2) * well_defined.unsqueeze(1)
-    return (weights * pair_well_defined * crossing_strength).sum(dim=(1, 2)).mean()
+    # vae_eval_common_v2.stroke_curvesが定義するベジェ制御点(弦の中点をoffset(実スケール)だけ
+    # ずらした点)を、start/endと同じ標準化頂点座標空間で求める。offsetはvertexとは別の正規化
+    # (stroke_offset_mean/std)を持つため、実スケールに変換してからvertex_stdで割ることで
+    # 頂点座標と同じアフィン変換後の空間に揃える(この空間内であれば交差判定のアフィン不変性が成り立つ)
+    offset_real = offset * stroke_offset_std + stroke_offset_mean
+    return (start + end) / 2 + offset_real / vertex_std
+
+
+def _segment_global_position(local_param: torch.Tensor, segment_index: int) -> torch.Tensor:
+    # 折れ線の線分(0: 始点->制御点、1: 制御点->終点)上のローカルなt(0〜1)を、ストローク全体を
+    # 弦一本とみなした場合と同じ0〜1スケールでの位置に変換する。制御点(曲線内部の点)がローカル
+    # パラメータの端(区間0のt=1、区間1のt=0)に来るため、変換せず_interior_gateにそのまま渡すと
+    # 曲線内部の点が本来の始点・終点と誤って同じ扱いで除外されてしまう
+    return (segment_index + local_param) / 2
+
+
+def _folded_segment_global_positions(
+    start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    # ストロークを2線分(0: 始点->制御点、1: 制御点->終点)の折れ線として近似し、4通りの線分の
+    # 組み合わせ(前半-前半、前半-後半、後半-前半、後半-後半)それぞれについて、交点パラメータを
+    # ストローク全体スケールの位置(t_global, u_global)に変換して返す
+    segments = [(start, mid), (mid, end)]
+    positions = []
+    for seg_i_index, (seg_i_start, seg_i_end) in enumerate(segments):
+        for seg_j_index, (seg_j_start, seg_j_end) in enumerate(segments):
+            t, u = _pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
+            positions.append(
+                (_segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index))
+            )
+    return positions
+
+
+def _folded_crossing_mask(start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor) -> torch.Tensor:
+    # 4通りの線分組み合わせを、ハード閾値・論理OR(いずれか1組でも交差していれば全体として
+    # 交差しているとみなす、勾配不要)で統合する。正解側の判定用
+    crossing = None
+    for t_global, u_global in _folded_segment_global_positions(start, end, mid):
+        interior = (
+            (t_global > CROSSING_GATE_LOW) & (t_global < CROSSING_GATE_HIGH)
+            & (u_global > CROSSING_GATE_LOW) & (u_global < CROSSING_GATE_HIGH)
+        )
+        crossing = interior if crossing is None else (crossing | interior)
+    return crossing
+
+
+def _folded_crossing_strength(start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor) -> torch.Tensor:
+    # _folded_crossing_maskと同じ4通りの組み合わせを、交差強度(0〜1の連続値)の確率的OR
+    # (ハード閾値・論理ORの微分可能な近似)で統合する。再構成側(勾配が必要)用
+    not_crossing = 1.0
+    for t_global, u_global in _folded_segment_global_positions(start, end, mid):
+        not_crossing = not_crossing * (1 - _interior_gate(t_global) * _interior_gate(u_global))
+    return 1 - not_crossing
 
 
 def _crossing_pair_weights(
-    true_start: torch.Tensor, true_end: torch.Tensor, existence: torch.Tensor
+    true_start: torch.Tensor,
+    true_end: torch.Tensor,
+    true_offset: torch.Tensor,
+    existence: torch.Tensor,
+    vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
 ) -> torch.Tensor:
     # 正解データで実際に交差しているペア(才のような正当な交差)は損失の対象外にする。交差の有無自体は
     # 不連続な事実であり勾配は不要なため、正解側の判定はハード閾値で行う。判定基準を正解側のみにするのは、
     # 再構成側は学習途中で崩れている可能性があるため
     with torch.no_grad():
-        t, u = _pairwise_intersection_params(true_start, true_end)
-        interior = (t > CROSSING_GATE_LOW) & (t < CROSSING_GATE_HIGH)
-        interior &= (u > CROSSING_GATE_LOW) & (u < CROSSING_GATE_HIGH)
-        not_crossing = (~interior).float()
+        mid = _fold_point(true_start, true_end, true_offset, vertex_std, stroke_offset_mean, stroke_offset_std)
+        crossing = _folded_crossing_mask(true_start, true_end, mid)
+        not_crossing = (~crossing).float()
     return off_diagonal_exist_pairs(existence) * not_crossing
+
+
+def _weighted_crossing_penalty(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    offset: torch.Tensor,
+    weights: torch.Tensor,
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
+) -> torch.Tensor:
+    # 再構成側の交差の強さ(0〜1の連続値)を求め、ペアごとの重みを掛けて損失にする。ペアの片方でも
+    # 方向ベクトルが退化していれば、そのペアは交差判定自体が意味をなさないため対象から除外する
+    mid = _fold_point(start, end, offset, vertex_std, stroke_offset_mean, stroke_offset_std)
+    crossing_strength = _folded_crossing_strength(start, end, mid)
+    well_defined = _well_defined_mask(_direction_real(start, end, vertex_mean, vertex_std))
+    pair_well_defined = well_defined.unsqueeze(2) * well_defined.unsqueeze(1)
+    return (weights * pair_well_defined * crossing_strength).sum(dim=(1, 2)).mean()
 
 
 def _compute_crossing_loss(
     true_start: torch.Tensor,
     true_end: torch.Tensor,
+    true_offset: torch.Tensor,
     recon_start: torch.Tensor,
     recon_end: torch.Tensor,
+    recon_offset: torch.Tensor,
     existence: torch.Tensor,
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
 ) -> torch.Tensor:
     # 正解で交差していないペアについて、再構成側の交差の強さにペナルティを与える
-    weights = _crossing_pair_weights(true_start, true_end, existence)
-    return _weighted_crossing_penalty(recon_start, recon_end, weights, vertex_mean, vertex_std)
+    weights = _crossing_pair_weights(
+        true_start, true_end, true_offset, existence, vertex_std, stroke_offset_mean, stroke_offset_std
+    )
+    return _weighted_crossing_penalty(
+        recon_start, recon_end, recon_offset, weights, vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std
+    )
 
 
 def _safe_angle(direction: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -257,6 +339,8 @@ def compute_loss(
     beta: float,
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
     angle_gmm: AngleGMM,
 ) -> LossComponents:
     # 特徴量・スロット方向は和、バッチ方向は平均を取る(sum→batch mean)。
@@ -300,8 +384,9 @@ def compute_loss(
 
     true_start, true_end = _true_stroke_points(vertices, stroke_vertex_indices)
     losses["crossing_loss"] = _compute_crossing_loss(
-        true_start, true_end, decoder_output.start_points, decoder_output.end_points, stroke_existence,
-        vertex_mean, vertex_std,
+        true_start, true_end, stroke_offsets,
+        decoder_output.start_points, decoder_output.end_points, decoder_output.stroke_offsets,
+        stroke_existence, vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std,
     )
     losses["angle_naturalness_loss"] = _compute_angle_naturalness_loss(
         true_start, true_end, decoder_output.start_points, decoder_output.end_points, stroke_existence,
