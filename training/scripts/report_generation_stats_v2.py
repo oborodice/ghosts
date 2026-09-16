@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# 混ぜ合わせ生成(attract_to_latent_prior)時の孤立率・3本以上合流・交差を、
-# report_generation_stats.pyと揃えた方法で数値化する診断ツール。VAEの学習・推論(生成)には
+# 混ぜ合わせ生成(attract_to_latent_prior)時の孤立率・3本以上合流・交差を、過去の実データ・
+# 生成結果の測定値と比較できる方法で数値化する診断ツール。VAEの学習・推論(生成)には
 # 一切組み込まれない、独立した事後診断用のスクリプト。あわせて、重複スロットが3本以上合流の
 # カウントを狂わせていないか、およびポインタの構造的な破綻(自己ループ・幽霊参照)の頻度も確認する
 import numpy as np
@@ -24,16 +24,18 @@ from vae_eval_common_v2 import (
     to_real_scale,
     true_strokes_real,
 )
+from vae_losses import AngleGMM, angle_log_density, build_angle_gmm
+from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import select_device
 
-SAMPLE_COUNT = 2000  # report_generation_stats.pyと同じ値(歴史的な比較のため)
+SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値(歴史的な比較のため)
 SEED = 0
 CONNECTION_THRESHOLD = 4.0  # extract_stroke_features_v2.CONNECTION_THRESHOLDと同じ
 
 
 def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray) -> float:
-    # report_generation_stats.pyの_isolated_stroke_rateと同じ定義(端点間距離のみを見て、
-    # 曲線の交差は考慮しない)を、始点・終点配列に対して適用する
+    # 端点間の実スケール距離のみで孤立を判定する(曲線同士の交差は考慮しない)。
+    # 過去の実データ・生成結果の測定値と比較できるよう、この定義(距離ベース、交差非考慮)を維持する
     endpoints = np.stack([start_points, end_points], axis=2)  # (N, stroke_count, 2[始点/終点], 2[x, y])
     total_isolated = total_strokes = 0
     for i in range(len(start_points)):
@@ -80,14 +82,36 @@ def _crossings_and_triple_junctions(
     return total, diag, triple
 
 
+def _angle_naturalness_log_density(
+    start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray, angle_gmm: AngleGMM
+) -> float:
+    # 正解データが無い生成経路でも比較できるよう、正解との相対評価ではなく、GMMの対数密度をそのまま
+    # 使う絶対評価にする(値が大きいほど自然)。退化した(始点・終点がほぼ同じ)ストロークは、
+    # 方向ベクトルのノルムがMIN_DIRECTION_NORM未満のものとして除外する
+    direction = end_points - start_points
+    well_defined = np.linalg.norm(direction, axis=-1) >= MIN_DIRECTION_NORM
+    mask = existence.astype(bool) & well_defined
+    angle = np.arctan2(direction[..., 1], direction[..., 0])
+    angle_tensor = torch.from_numpy(angle[mask]).float().to(angle_gmm.means.device)
+    log_density = angle_log_density(angle_tensor, angle_gmm)
+    return log_density.mean().item()
+
+
 def _report(
-    label: str, start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray
+    label: str,
+    start_points: np.ndarray,
+    end_points: np.ndarray,
+    offsets: np.ndarray,
+    existence: np.ndarray,
+    angle_gmm: AngleGMM,
 ) -> None:
     crossings, diag, triple = _crossings_and_triple_junctions(start_points, end_points, offsets, existence)
     print(f"--- {label} (n={len(start_points)}) ---")
     print(f"isolated_stroke_rate = {_isolated_stroke_rate(start_points, end_points, existence):.2f}%")
     print(f"crossings mean = {crossings.mean():.3f} (diagonal-involved = {diag.mean():.3f})")
     print(f"triple_junctions mean = {triple.mean():.3f}")
+    print(f"angle_naturalness (log density, higher = more natural) = "
+          f"{_angle_naturalness_log_density(start_points, end_points, existence, angle_gmm):.3f}")
     print()
 
 
@@ -176,7 +200,9 @@ def _print_duplicate_slot_check(
 def main() -> None:
     device = select_device()
     checkpoint = load_checkpoint(device)
-    train_batch = load_batch(prepare_datasets(), "train", device)
+    datasets = prepare_datasets()
+    angle_gmm = build_angle_gmm(datasets.angle_gmm_params, device)
+    train_batch = load_batch(datasets, "train", device)
 
     with torch.no_grad():
         mu_real, _ = encode_batch(checkpoint, train_batch)
@@ -186,7 +212,7 @@ def main() -> None:
     true_vertex_existence_mask = train_batch.vertex_existence.cpu().numpy().astype(bool)
     true_start_index = train_batch.stroke_vertex_indices[..., 0].cpu().numpy()
     true_end_index = train_batch.stroke_vertex_indices[..., 1].cpu().numpy()
-    _report("real data", true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence)
+    _report("real data", true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence, angle_gmm)
     _report_pointer_integrity(
         "real data", true_start_index, true_end_index, true_vertex_existence_mask, true_existence
     )
@@ -197,7 +223,7 @@ def main() -> None:
     recon_existence = existence_mask_from_logits(recon_output.stroke_existence_logits)
     _report(
         "reconstruction (encode -> decode(mu))",
-        recon_strokes.start, recon_strokes.end, recon_strokes.offsets, recon_existence,
+        recon_strokes.start, recon_strokes.end, recon_strokes.offsets, recon_existence, angle_gmm,
     )
     _report_pointer_integrity(
         "reconstruction (encode -> decode(mu))",
@@ -217,7 +243,7 @@ def main() -> None:
     generated_existence = existence_mask_from_logits(decoder_output.stroke_existence_logits)
     _report(
         "generated (current production checkpoint)",
-        generated_strokes.start, generated_strokes.end, generated_strokes.offsets, generated_existence,
+        generated_strokes.start, generated_strokes.end, generated_strokes.offsets, generated_existence, angle_gmm,
     )
     _report_pointer_integrity(
         "generated (current production checkpoint)",
