@@ -4,6 +4,12 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 
+from vae_crossing_geometry_v2 import (
+    CROSSING_GATE_HIGH,
+    CROSSING_GATE_LOW,
+    interior_gate,
+    pairwise_segment_intersection_params,
+)
 from vae_losses import AngleGMM, angle_log_density, off_diagonal_exist_pairs
 from vae_model_v2 import DecoderOutput
 
@@ -25,10 +31,6 @@ class LossComponents(NamedTuple):
     vertex_repulsion_loss: torch.Tensor
 
 
-CROSSING_GATE_LOW = 0.08  # 交点パラメータt, uがこの範囲内ならストローク内部での交差とみなす(下限)。端点付近の接続点を除外する
-CROSSING_GATE_HIGH = 0.92  # 同上(上限)
-CROSSING_GATE_SHARPNESS = 40.0  # _interior_gateのsigmoidの急峻さ(大きいほど矩形窓に近づく)
-CROSSING_DENOM_EPSILON = 1e-6  # 平行な弦同士でのゼロ除算回避
 CROSSING_LOSS_WEIGHT = 0.3  # 独立ストローク表現でのweight sweepの結果を暫定採用する。頂点参照ベースでは
 # 損失全体のスケールが変わるため最適値がそのまま通用する保証はないが、まず動かして傾向を見るための暫定値とする
 ANGLE_NATURALNESS_LOSS_WEIGHT = 1.0  # 同上
@@ -91,34 +93,6 @@ def _well_defined_mask(direction: torch.Tensor) -> torch.Tensor:
     return (direction.norm(dim=-1) >= MIN_DIRECTION_NORM).float()
 
 
-def _pairwise_segment_intersection_params(
-    start1: torch.Tensor, end1: torch.Tensor, start2: torch.Tensor, end2: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # 線分1(start1->end1、ストロークiの区間)と線分2(start2->end2、ストロークjの区間)の
-    # 全ペア(i, j)について、交点パラメータt(線分1上の位置)・u(線分2上の位置)をクラメルの公式
-    # (2元1次方程式)で解く。t, uはアフィン変換で不変(2次元クロス積の分子・分母に現れるdetが
-    # 約分される)ため、start1/end1とstart2/end2が同じアフィン変換後の空間(標準化頂点座標空間)に
-    # あれば、標準化スケールの座標をそのまま使ってよい
-    d1 = (end1 - start1).unsqueeze(2)  # (B, stroke_count, 1, 2) -- iの方向、jへブロードキャスト
-    d2 = (end2 - start2).unsqueeze(1)  # (B, 1, stroke_count, 2) -- jの方向、iへブロードキャスト
-    denom = d1[..., 0] * d2[..., 1] - d1[..., 1] * d2[..., 0]
-    # 平行な線分(denom≈0)はt, uが発散するが、_interior_gateで範囲外に押し出されるため実害はない
-    denom = torch.where(denom.abs() < CROSSING_DENOM_EPSILON, torch.full_like(denom, CROSSING_DENOM_EPSILON), denom)
-
-    diff = start2.unsqueeze(1) - start1.unsqueeze(2)  # p3 - p1, (B, stroke_count(i), stroke_count(j), 2)
-    t = (diff[..., 0] * d2[..., 1] - diff[..., 1] * d2[..., 0]) / denom
-    u = (diff[..., 0] * d1[..., 1] - diff[..., 1] * d1[..., 0]) / denom
-    return t, u
-
-
-def _interior_gate(t: torch.Tensor) -> torch.Tensor:
-    # t=CROSSING_GATE_LOW〜HIGHの範囲(ストローク内部)を、2つのsigmoidの積による
-    # なめらかな矩形窓で近似する(線分交差判定は本質的に微分不可能なため)
-    low = torch.sigmoid(CROSSING_GATE_SHARPNESS * (t - CROSSING_GATE_LOW))
-    high = torch.sigmoid(CROSSING_GATE_SHARPNESS * (CROSSING_GATE_HIGH - t))
-    return low * high
-
-
 def _fold_point(
     start: torch.Tensor,
     end: torch.Tensor,
@@ -138,7 +112,7 @@ def _fold_point(
 def _segment_global_position(local_param: torch.Tensor, segment_index: int) -> torch.Tensor:
     # 折れ線の線分(0: 始点->制御点、1: 制御点->終点)上のローカルなt(0〜1)を、ストローク全体を
     # 弦一本とみなした場合と同じ0〜1スケールでの位置に変換する。制御点(曲線内部の点)がローカル
-    # パラメータの端(区間0のt=1、区間1のt=0)に来るため、変換せず_interior_gateにそのまま渡すと
+    # パラメータの端(区間0のt=1、区間1のt=0)に来るため、変換せずinterior_gateにそのまま渡すと
     # 曲線内部の点が本来の始点・終点と誤って同じ扱いで除外されてしまう
     return (segment_index + local_param) / 2
 
@@ -153,7 +127,7 @@ def _folded_segment_global_positions(
     positions = []
     for seg_i_index, (seg_i_start, seg_i_end) in enumerate(segments):
         for seg_j_index, (seg_j_start, seg_j_end) in enumerate(segments):
-            t, u = _pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
+            t, u = pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
             positions.append(
                 (_segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index))
             )
@@ -178,7 +152,7 @@ def _folded_crossing_strength(start: torch.Tensor, end: torch.Tensor, mid: torch
     # (ハード閾値・論理ORの微分可能な近似)で統合する。再構成側(勾配が必要)用
     not_crossing = 1.0
     for t_global, u_global in _folded_segment_global_positions(start, end, mid):
-        not_crossing = not_crossing * (1 - _interior_gate(t_global) * _interior_gate(u_global))
+        not_crossing = not_crossing * (1 - interior_gate(t_global) * interior_gate(u_global))
     return 1 - not_crossing
 
 

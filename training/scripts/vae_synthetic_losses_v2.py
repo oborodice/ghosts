@@ -4,7 +4,9 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 
-from vae_model_v2 import VAE
+from vae_crossing_geometry_v2 import chord_crossing_per_sample_total
+from vae_losses_v2 import MIN_DIRECTION_NORM
+from vae_model_v2 import VAE, DecoderOutput
 
 
 class SyntheticLossComponents(NamedTuple):
@@ -14,6 +16,7 @@ class SyntheticLossComponents(NamedTuple):
     # 同じ設計)
     total: torch.Tensor
     self_loop_loss: torch.Tensor
+    crossing_loss: torch.Tensor
 
 
 SYNTHETIC_BANDWIDTH = 0.6  # Nadaraya-Watson推定量の帯域。正式な値は今後のsweepで決める暫定値
@@ -21,6 +24,8 @@ SYNTHETIC_EXISTENCE_THRESHOLD = 0.5  # 合成データの予測existenceをマ�
 SELF_LOOP_LOSS_WEIGHT = 1.0  # 1本のストロークの始点・終点ポインタが同じ頂点を指してしまう自己ループ
 # (実データでは常に0%、混ぜ合わせ生成時に特有の現象)を抑制する。既存コードに対応物が存在しない
 # 新規の損失のため暫定値とする
+SYNTHETIC_CROSSING_WEIGHT = 1.0  # 生成側crossings頻度を実データの頻度分布に近づけるmoment matching損失。
+# 既存コードに対応物が存在しない新規の損失のため暫定値とする
 
 
 def _attract_batch(z_raw: torch.Tensor, mu_batch: torch.Tensor, bandwidth: float) -> torch.Tensor:
@@ -37,6 +42,14 @@ def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
     # マスクは離散的な採用判定であり勾配は不要なためdetachする
     with torch.no_grad():
         return (torch.sigmoid(existence_logits) > SYNTHETIC_EXISTENCE_THRESHOLD).float()
+
+
+def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, detach_slots: bool) -> DecoderOutput:
+    # バッチ内の実データのmuへランダムなz_rawを引き寄せた合成zを構築してdecodeする。
+    # 合成z側の損失(self_loop・crossing)がいずれも最初に行う共通処理
+    z_raw = torch.randn_like(mu)
+    z_synthetic = _attract_batch(z_raw, mu.detach(), SYNTHETIC_BANDWIDTH)
+    return model.decode(z_synthetic, detach_slots=detach_slots)
 
 
 def _compute_self_loop_penalty(
@@ -58,26 +71,74 @@ def _compute_self_loop_loss(model: VAE, mu: torch.Tensor) -> torch.Tensor:
     # vertex_features等と共有されているTransformer出力(slots)自体を変える必要はない。
     # detachしないと、混ぜ合わせz(実データより自由度が高い領域)での学習を通じて、
     # 共有されたslotsを経由し頂点座標側に意図しない副作用(過剰接続の悪化)が漏れることを実測で確認済み
-    z_raw = torch.randn_like(mu)
-    z_synthetic = _attract_batch(z_raw, mu.detach(), SYNTHETIC_BANDWIDTH)
-    decoder_output = model.decode(z_synthetic, detach_slots=True)
+    decoder_output = _decode_synthetic_batch(model, mu, detach_slots=True)
     existence = _synthetic_existence_mask(decoder_output.stroke_existence_logits)
     return _compute_self_loop_penalty(
         decoder_output.start_pointer_logits, decoder_output.end_pointer_logits, existence
     )
 
 
-def compute_synthetic_loss(model: VAE, mu: torch.Tensor) -> SyntheticLossComponents:
+def _huber(residual: torch.Tensor, delta: float) -> torch.Tensor:
+    # 残差がdelta以内ならL2(滑らかで目標付近での精密な収束を維持)、delta超ならL1
+    # (勾配の大きさがdeltaで頭打ちになり暴走を防ぐ)に切り替わる、外れ値に頑健な標準的な損失。
+    # スクラッチ学習(ランダム初期化直後)ではバッチ集計統計が目標から大きく乖離しうるため、
+    # 素朴な二乗誤差だと乖離の大きさに応じて勾配が際限なく増幅し、共有Transformer全体を
+    # 経由して学習全体を破壊することを実測で確認済み(detach_slots=Falseのため)
+    abs_residual = residual.abs()
+    quadratic = torch.clamp(abs_residual, max=delta)
+    linear = abs_residual - quadratic
+    return 0.5 * quadratic**2 + delta * linear
+
+
+def _compute_synthetic_crossing_loss(
+    model: VAE, mu: torch.Tensor, vertex_std: torch.Tensor, target_mean: float, target_std: float
+) -> torch.Tensor:
+    # 合成サンプル1つあたりの交差数(始点・終点を結ぶ弦のみの判定。vae_data_v2.
+    # _compute_crossing_targetsと同じ判定方法)を求め、バッチ内の平均・標準偏差を実データ全体の
+    # 固定目標値に近づけるmoment matching損失(旧`vae_synthetic_losses.py`の
+    # `_length_moment_matching_loss`と発想は同じだが、二乗誤差ではなくHuber損失を使う。理由は
+    # _huberのコメントを参照)。折れ線ではなく弦のみを使う理由・目標値の算出方法は
+    # vae_data_v2._compute_crossing_targetsのコメントを参照。
+    # detach_slots=False: crossingは頂点配置(vertex_features)自体を教える必要がある損失であり、
+    # self_loop_lossのようにポインタ選択だけを教えたいわけではない。detach_slots=Trueにすると
+    # 勾配がvertex_feature_headという共有Linear層1つ(かつ再構成側vertex_lossの勾配に支配される)
+    # までしか届かず、crossings統計が全く動かないことを実測で確認済み。再構成側への軽微な副作用
+    # (crossing_loss/vertex_repulsion_lossの値が上昇)は確認済みだが、本番学習・3点比較で許容範囲か
+    # 最終確認する
+    decoder_output = _decode_synthetic_batch(model, mu, detach_slots=False)
+    existence = _synthetic_existence_mask(decoder_output.stroke_existence_logits)
+    start, end = decoder_output.start_points, decoder_output.end_points
+
+    well_defined = (((end - start) * vertex_std).norm(dim=-1) >= MIN_DIRECTION_NORM).float()
+    per_sample_total = chord_crossing_per_sample_total(start, end, existence, well_defined)
+    batch_mean = per_sample_total.mean()
+    batch_std = per_sample_total.std()
+    return _huber(batch_mean - target_mean, target_std) + _huber(batch_std - target_std, target_std)
+
+
+def compute_synthetic_loss(
+    model: VAE,
+    mu: torch.Tensor,
+    vertex_std: torch.Tensor,
+    target_crossings_mean: float,
+    target_crossings_std: float,
+) -> SyntheticLossComponents:
     # model自体を使って混ぜ合わせzをdecodeする必要があり、vae_losses_v2.compute_lossが受け取る
     # decoder_output(再構成側のdecode結果)だけでは完結しないため別枠にしている。
     # lossesは重み乗算前の生の値。個々の損失を追加するたびに(a)このdictへの1行(b)重みが1.0以外
-    # ならweightsへの1行、の2箇所を触るだけで済む(vae_losses_v2.compute_lossと同じ設計)
+    # ならweightsへの1行、の2箇所を触るだけで済む(vae_losses_v2.compute_lossと同じ設計)。
+    # self_loop_loss(detach_slots=True)とcrossing_loss(detach_slots=False)は必要なdetach設定が
+    # 異なるため、decodeを共有せずそれぞれ独立に合成zを構築・decodeする
     losses: dict[str, torch.Tensor] = {}
     losses["self_loop_loss"] = _compute_self_loop_loss(model, mu)
+    losses["crossing_loss"] = _compute_synthetic_crossing_loss(
+        model, mu, vertex_std, target_crossings_mean, target_crossings_std
+    )
 
     # ここに列挙のない損失は暗黙的に重み1.0として扱う
     weights = {
         "self_loop_loss": SELF_LOOP_LOSS_WEIGHT,
+        "crossing_loss": SYNTHETIC_CROSSING_WEIGHT,
     }
     total = sum(weights.get(name, 1.0) * value for name, value in losses.items())
     return SyntheticLossComponents(total=total, **losses)

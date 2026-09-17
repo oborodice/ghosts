@@ -7,7 +7,9 @@ import torch
 from sklearn.mixture import GaussianMixture
 from torch.utils.data import TensorDataset
 
+from vae_crossing_geometry_v2 import chord_crossing_per_sample_total
 from vae_data import AngleGMMParams
+from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import ModelShape
 
 DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "stroke_features_v2.npz"
@@ -79,6 +81,33 @@ def _fit_angle_gmm(
     return AngleGMMParams(gmm.means_, gmm.covariances_, gmm.weights_)
 
 
+def _compute_crossing_targets(
+    vertices: np.ndarray,
+    stroke_vertex_indices: np.ndarray,
+    stroke_existence: np.ndarray,
+    train_indices: np.ndarray,
+) -> tuple[float, float]:
+    # 合成z側crossing損失(moment matching)の目標値。損失側と同じ判定(弦のみ、上三角、
+    # existence/well-defined込み)をtrain splitの正解データに適用して一度だけ計算する
+    # (_fit_angle_gmmと同じ設計: 標準化前の実スケールのverticesをそのまま使う)。曲線の曲がり
+    # (offset)を考慮した折れ線近似ではなく弦のみを使うのは、この損失が個々のペアの正誤ではなく
+    # 集計頻度を狙うものであり、折れ線近似(4通りの線分ペアの確率的OR)は実データでの目標値が
+    # 精密測定の2.76倍に水増しされる(検証済み)ため
+    train_vertices = torch.tensor(vertices[train_indices], dtype=torch.float32)
+    train_stroke_vertex_indices = torch.tensor(stroke_vertex_indices[train_indices], dtype=torch.int64)
+    train_stroke_existence = torch.tensor(stroke_existence[train_indices], dtype=torch.float32)
+
+    feature_dim = train_vertices.shape[-1]
+    start_index = train_stroke_vertex_indices[..., 0:1].expand(-1, -1, feature_dim)
+    end_index = train_stroke_vertex_indices[..., 1:2].expand(-1, -1, feature_dim)
+    start = torch.gather(train_vertices, 1, start_index)
+    end = torch.gather(train_vertices, 1, end_index)
+
+    well_defined = ((end - start).norm(dim=-1) >= MIN_DIRECTION_NORM).float()
+    per_sample_total = chord_crossing_per_sample_total(start, end, train_stroke_existence, well_defined)
+    return per_sample_total.mean().item(), per_sample_total.std().item()
+
+
 def _build_dataset(
     indices: np.ndarray,
     vertices: np.ndarray,
@@ -105,6 +134,8 @@ class Datasets(NamedTuple):
     stroke_offset_mean: np.ndarray
     stroke_offset_std: np.ndarray
     angle_gmm_params: AngleGMMParams
+    target_crossings_mean: float
+    target_crossings_std: float
 
 
 def prepare_datasets() -> Datasets:
@@ -121,6 +152,9 @@ def prepare_datasets() -> Datasets:
     vertices_standardized = _standardize(vertices, vertex_mean, vertex_std)
     stroke_offsets_standardized = _standardize(stroke_offsets, stroke_offset_mean, stroke_offset_std)
     angle_gmm_params = _fit_angle_gmm(vertices, stroke_vertex_indices, stroke_existence, train_indices)
+    target_crossings_mean, target_crossings_std = _compute_crossing_targets(
+        vertices, stroke_vertex_indices, stroke_existence, train_indices
+    )
 
     train_dataset = _build_dataset(
         train_indices,
@@ -140,5 +174,5 @@ def prepare_datasets() -> Datasets:
     )
     return Datasets(
         train_dataset, val_dataset, shape, vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std,
-        angle_gmm_params,
+        angle_gmm_params, target_crossings_mean, target_crossings_std,
     )

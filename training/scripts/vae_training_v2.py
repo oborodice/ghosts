@@ -37,6 +37,31 @@ PATIENCE = 20
 MAX_EPOCHS = 1000  # early stoppingが正常なら到達しない安全上限
 
 
+class LossContext(NamedTuple):
+    # 損失計算に必要な、データセットから一度だけ導出される統計量一式(train/val・epochを通じて不変)。
+    # 新しい合成z側損失を追加するたびに`_forward_and_compute_loss`等の引数リストが伸び続けるのを
+    # 避けるため、1つのまとまりとして持ち回す
+    vertex_mean: torch.Tensor
+    vertex_std: torch.Tensor
+    stroke_offset_mean: torch.Tensor
+    stroke_offset_std: torch.Tensor
+    angle_gmm: AngleGMM
+    target_crossings_mean: float
+    target_crossings_std: float
+
+
+def _build_loss_context(datasets: Datasets, device: torch.device) -> LossContext:
+    return LossContext(
+        vertex_mean=torch.tensor(datasets.vertex_mean, dtype=torch.float32, device=device),
+        vertex_std=torch.tensor(datasets.vertex_std, dtype=torch.float32, device=device),
+        stroke_offset_mean=torch.tensor(datasets.stroke_offset_mean, dtype=torch.float32, device=device),
+        stroke_offset_std=torch.tensor(datasets.stroke_offset_std, dtype=torch.float32, device=device),
+        angle_gmm=build_angle_gmm(datasets.angle_gmm_params, device),
+        target_crossings_mean=datasets.target_crossings_mean,
+        target_crossings_std=datasets.target_crossings_std,
+    )
+
+
 def _compute_beta(epoch: int, beta: float, kl_annealing_epochs: int) -> float:
     # 学習序盤にKL項がフルに効くと一部の潜在次元が使われなくなる(posterior collapse)ため、線形にwarm-upする
     return beta * min(1.0, epoch / kl_annealing_epochs)
@@ -48,11 +73,7 @@ def _forward_and_compute_loss(
     shape: ModelShape,
     device: torch.device,
     beta: float,
-    vertex_mean: torch.Tensor,
-    vertex_std: torch.Tensor,
-    stroke_offset_mean: torch.Tensor,
-    stroke_offset_std: torch.Tensor,
-    angle_gmm: AngleGMM,
+    ctx: LossContext,
 ) -> tuple[torch.Tensor, LossComponents, SyntheticLossComponents]:
     # 1バッチ分のforward計算と、再構成側(LossComponents)・混ぜ合わせz側(SyntheticLossComponents)
     # 両方の損失計算をまとめる。学習対象の合計は両者のtotalの和
@@ -63,9 +84,12 @@ def _forward_and_compute_loss(
     decoder_output, mu, logvar = model(x)
     recon_loss = compute_loss(
         vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence,
-        decoder_output, mu, logvar, beta, vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std, angle_gmm,
+        decoder_output, mu, logvar, beta, ctx.vertex_mean, ctx.vertex_std,
+        ctx.stroke_offset_mean, ctx.stroke_offset_std, ctx.angle_gmm,
     )
-    synthetic_loss = compute_synthetic_loss(model, mu)
+    synthetic_loss = compute_synthetic_loss(
+        model, mu, ctx.vertex_std, ctx.target_crossings_mean, ctx.target_crossings_std,
+    )
     total = recon_loss.total + synthetic_loss.total
     return total, recon_loss, synthetic_loss
 
@@ -86,11 +110,7 @@ def _run_epoch(
     device: torch.device,
     optimizer: optim.Optimizer | None,
     beta: float,
-    vertex_mean: torch.Tensor,
-    vertex_std: torch.Tensor,
-    stroke_offset_mean: torch.Tensor,
-    stroke_offset_std: torch.Tensor,
-    angle_gmm: AngleGMM,
+    ctx: LossContext,
 ) -> tuple[LossComponents, SyntheticLossComponents]:
     # optimizerがNoneのとき(validation時)は重み更新を行わないeval modeとして扱う
     is_training = optimizer is not None
@@ -100,10 +120,7 @@ def _run_epoch(
     synthetic_totals = {field: 0.0 for field in SyntheticLossComponents._fields}
     with torch.set_grad_enabled(is_training):
         for batch in loader:
-            total, recon_loss, synthetic_loss = _forward_and_compute_loss(
-                model, batch, shape, device, beta, vertex_mean, vertex_std,
-                stroke_offset_mean, stroke_offset_std, angle_gmm,
-            )
+            total, recon_loss, synthetic_loss = _forward_and_compute_loss(model, batch, shape, device, beta, ctx)
 
             if optimizer is not None:
                 optimizer.zero_grad()
@@ -129,11 +146,7 @@ class _TrainingState(NamedTuple):
     optimizer: optim.Optimizer
     train_loader: DataLoader
     val_loader: DataLoader
-    vertex_mean: torch.Tensor
-    vertex_std: torch.Tensor
-    stroke_offset_mean: torch.Tensor
-    stroke_offset_std: torch.Tensor
-    angle_gmm: AngleGMM
+    ctx: LossContext
 
 
 def _build_training_state(
@@ -156,15 +169,8 @@ def _build_training_state(
 
     model = VAE(datasets.shape, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    vertex_mean = torch.tensor(datasets.vertex_mean, dtype=torch.float32, device=device)
-    vertex_std = torch.tensor(datasets.vertex_std, dtype=torch.float32, device=device)
-    stroke_offset_mean = torch.tensor(datasets.stroke_offset_mean, dtype=torch.float32, device=device)
-    stroke_offset_std = torch.tensor(datasets.stroke_offset_std, dtype=torch.float32, device=device)
-    angle_gmm = build_angle_gmm(datasets.angle_gmm_params, device)
-    return _TrainingState(
-        model, optimizer, train_loader, val_loader,
-        vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std, angle_gmm,
-    )
+    ctx = _build_loss_context(datasets, device)
+    return _TrainingState(model, optimizer, train_loader, val_loader, ctx)
 
 
 def train(
@@ -196,13 +202,11 @@ def train(
     for epoch in range(1, max_epochs + 1):
         beta_epoch = _compute_beta(epoch, beta, kl_annealing_epochs)
         train_losses, train_synthetic = _run_epoch(
-            state.train_loader, state.model, datasets.shape, device, state.optimizer, beta_epoch,
-            state.vertex_mean, state.vertex_std, state.stroke_offset_mean, state.stroke_offset_std, state.angle_gmm,
+            state.train_loader, state.model, datasets.shape, device, state.optimizer, beta_epoch, state.ctx
         )
         # 早期終了・チェックポイント選定はannealing中でも比較可能にするため、常に最終的なβ(=beta)で評価する
         val_losses, val_synthetic = _run_epoch(
-            state.val_loader, state.model, datasets.shape, device, None, beta,
-            state.vertex_mean, state.vertex_std, state.stroke_offset_mean, state.stroke_offset_std, state.angle_gmm,
+            state.val_loader, state.model, datasets.shape, device, None, beta, state.ctx
         )
         # 学習対象・early stopping判定に使う実際の合計は、再構成側・混ぜ合わせz側それぞれのtotalの和
         train_total = train_losses.total + train_synthetic.total
@@ -212,7 +216,7 @@ def train(
             f"train breakdown: vertex={train_losses.vertex_loss:.4f} kl={train_losses.kl_divergence:.4f} "
             f"crossing={train_losses.crossing_loss:.4f} angle={train_losses.angle_naturalness_loss:.4f} "
             f"min_length={train_losses.min_length_loss:.4f} repulsion={train_losses.vertex_repulsion_loss:.4f} "
-            f"self_loop={train_synthetic.self_loop_loss:.4f}"
+            f"self_loop={train_synthetic.self_loop_loss:.4f} synthetic_crossing={train_synthetic.crossing_loss:.4f}"
         )
 
         if val_total < best_val_loss:
@@ -220,7 +224,7 @@ def train(
             epochs_without_improvement = 0
             save_checkpoint(
                 state.model, datasets.shape, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature,
-                state.vertex_mean, state.vertex_std, state.stroke_offset_mean, state.stroke_offset_std,
+                state.ctx.vertex_mean, state.ctx.vertex_std, state.ctx.stroke_offset_mean, state.ctx.stroke_offset_std,
                 checkpoint_path,
             )
         else:
