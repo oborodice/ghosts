@@ -119,29 +119,32 @@ def _segment_global_position(local_param: torch.Tensor, segment_index: int) -> t
 
 def _folded_segment_global_positions(
     start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     # ストロークを2線分(0: 始点->制御点、1: 制御点->終点)の折れ線として近似し、4通りの線分の
     # 組み合わせ(前半-前半、前半-後半、後半-前半、後半-後半)それぞれについて、交点パラメータを
-    # ストローク全体スケールの位置(t_global, u_global)に変換して返す
+    # ストローク全体スケールの位置(t_global, u_global)に変換して返す。degenerateは
+    # pairwise_segment_intersection_params参照(2線分がほぼ同一直線上に重なる退化ケース)
     segments = [(start, mid), (mid, end)]
     positions = []
     for seg_i_index, (seg_i_start, seg_i_end) in enumerate(segments):
         for seg_j_index, (seg_j_start, seg_j_end) in enumerate(segments):
-            t, u = pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
+            t, u, degenerate = pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
             positions.append(
-                (_segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index))
+                (_segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index), degenerate)
             )
     return positions
 
 
 def _folded_crossing_mask(start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor) -> torch.Tensor:
     # 4通りの線分組み合わせを、ハード閾値・論理OR(いずれか1組でも交差していれば全体として
-    # 交差しているとみなす、勾配不要)で統合する。正解側の判定用
+    # 交差しているとみなす、勾配不要)で統合する。正解側の判定用。degenerate(2線分が同一直線上に
+    # 重なる退化ケース、t, uの値が信頼できない)なペアは判定不能として交差から除外する
     crossing = None
-    for t_global, u_global in _folded_segment_global_positions(start, end, mid):
+    for t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
         interior = (
             (t_global > CROSSING_GATE_LOW) & (t_global < CROSSING_GATE_HIGH)
             & (u_global > CROSSING_GATE_LOW) & (u_global < CROSSING_GATE_HIGH)
+            & ~degenerate
         )
         crossing = interior if crossing is None else (crossing | interior)
     return crossing
@@ -149,10 +152,12 @@ def _folded_crossing_mask(start: torch.Tensor, end: torch.Tensor, mid: torch.Ten
 
 def _folded_crossing_strength(start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor) -> torch.Tensor:
     # _folded_crossing_maskと同じ4通りの組み合わせを、交差強度(0〜1の連続値)の確率的OR
-    # (ハード閾値・論理ORの微分可能な近似)で統合する。再構成側(勾配が必要)用
+    # (ハード閾値・論理ORの微分可能な近似)で統合する。再構成側(勾配が必要)用。degenerateなペアは
+    # 交差強度を強制的に0にする(_folded_crossing_maskと同じ理由)
     not_crossing = 1.0
-    for t_global, u_global in _folded_segment_global_positions(start, end, mid):
-        not_crossing = not_crossing * (1 - interior_gate(t_global) * interior_gate(u_global))
+    for t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
+        pair_strength = interior_gate(t_global) * interior_gate(u_global) * (~degenerate).float()
+        not_crossing = not_crossing * (1 - pair_strength)
     return 1 - not_crossing
 
 

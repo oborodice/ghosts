@@ -11,7 +11,7 @@ CROSSING_DENOM_EPSILON = 1e-6  # 平行な線分同士でのゼロ除算回避
 
 def pairwise_segment_intersection_params(
     start1: torch.Tensor, end1: torch.Tensor, start2: torch.Tensor, end2: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # 線分1(start1->end1、ストロークiの区間)と線分2(start2->end2、ストロークjの区間)の
     # 全ペア(i, j)について、交点パラメータt(線分1上の位置)・u(線分2上の位置)をクラメルの公式
     # (2元1次方程式)で解く。t, uはアフィン変換で不変(2次元クロス積の分子・分母に現れるdetが
@@ -20,13 +20,19 @@ def pairwise_segment_intersection_params(
     d1 = (end1 - start1).unsqueeze(2)  # (B, stroke_count, 1, 2) -- iの方向、jへブロードキャスト
     d2 = (end2 - start2).unsqueeze(1)  # (B, 1, stroke_count, 2) -- jの方向、iへブロードキャスト
     denom = d1[..., 0] * d2[..., 1] - d1[..., 1] * d2[..., 0]
-    # 平行な線分(denom≈0)はt, uが発散するが、interior_gateで範囲外に押し出されるため実害はない
-    denom = torch.where(denom.abs() < CROSSING_DENOM_EPSILON, torch.full_like(denom, CROSSING_DENOM_EPSILON), denom)
+    # 平行な線分(denom≈0)は、単に別々の場所にあるだけならt, uが確実に発散しinterior_gateで
+    # 範囲外に押し出されるため実害はない。しかし2線分が完全に同一直線上へ重なる場合は分子側の量も
+    # 同時にゼロへ近づく0/0に近い不定形になり、epsilonへの置き換えだけでは丸め誤差次第で
+    # 実質ランダムな値になってしまう(実測で、この不定形が多数のペアで同時発生し偽の交差を
+    # 大量発生させ、学習が破壊されることを確認済み)。degenerateを呼び出し側に返し、
+    # このt, uの値そのものを判定に使わせないことで安全性を保証する
+    degenerate = denom.abs() < CROSSING_DENOM_EPSILON
+    denom = torch.where(degenerate, torch.full_like(denom, CROSSING_DENOM_EPSILON), denom)
 
     diff = start2.unsqueeze(1) - start1.unsqueeze(2)  # p3 - p1, (B, stroke_count(i), stroke_count(j), 2)
     t = (diff[..., 0] * d2[..., 1] - diff[..., 1] * d2[..., 0]) / denom
     u = (diff[..., 0] * d1[..., 1] - diff[..., 1] * d1[..., 0]) / denom
-    return t, u
+    return t, u, degenerate
 
 
 def interior_gate(t: torch.Tensor) -> torch.Tensor:
@@ -45,8 +51,8 @@ def chord_crossing_per_sample_total(
     # (well_defined)ペアに限定する。crossingの頻度を集計統計として扱う損失・目標値の計算
     # (vae_data_v2._compute_crossing_targets、vae_synthetic_losses_v2._compute_synthetic_crossing_loss)
     # で共通して使う
-    t, u = pairwise_segment_intersection_params(start, end, start, end)
-    strength = interior_gate(t) * interior_gate(u)
+    t, u, degenerate = pairwise_segment_intersection_params(start, end, start, end)
+    strength = interior_gate(t) * interior_gate(u) * (~degenerate).float()
 
     stroke_count = strength.shape[1]
     upper_triangle = torch.triu(
