@@ -7,12 +7,14 @@ import numpy as np
 import torch
 
 from vae_checkpoint_v2 import load_checkpoint
+from vae_crossing_geometry_v2 import bezier_polyline_points, polyline_crossing_points, polyline_diagonal_involved_mask
 from vae_data_v2 import prepare_datasets
 from vae_eval_common import (
+    AXIS_TOLERANCE_DEG,
     JUNCTION_CLUSTER_RADIUS,
+    JUNCTION_CONNECTION_THRESHOLD,
+    SEGMENTS_PER_CURVE,
     attract_to_latent_prior,
-    classify_crossings,
-    count_triple_junctions,
     existence_mask_from_logits,
 )
 from vae_eval_common_v2 import (
@@ -20,7 +22,6 @@ from vae_eval_common_v2 import (
     encode_batch,
     load_batch,
     reconstructed_strokes_real,
-    stroke_curves,
     to_real_scale,
     true_strokes_real,
 )
@@ -54,31 +55,92 @@ def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, exis
     return 100 * total_isolated / total_strokes if total_strokes else float("nan")
 
 
-def _active_angles(start_points: np.ndarray, end_points: np.ndarray, existence_mask: np.ndarray) -> np.ndarray:
-    # classify_crossingsに渡す角度は、stroke_curvesと同じ順序(存在するストロークのみ、元の並び順)で揃える必要がある
-    delta = end_points[existence_mask] - start_points[existence_mask]
-    return np.arctan2(delta[:, 1], delta[:, 0])
+def _triple_junction_count(
+    crossing: np.ndarray, crossing_point: np.ndarray, start_points: np.ndarray, end_points: np.ndarray, mask: np.ndarray
+) -> int:
+    # 3本以上合流の検出。交差点(crossing/crossing_pointとしてベクトル化済み)と端点同士の近接
+    # (ここではPythonのまま、ストローク数に対してO(n^2)だが定数が小さく軽い)を同じ「交点」として
+    # 扱い、Union-Find(vae_eval_common.count_triple_junctionsと同じアルゴリズム)でクラスタリングする
+    active = np.where(mask)[0]
+    interaction_points = []
+    interaction_strokes = []
+    for ii in range(len(active)):
+        a = active[ii]
+        for jj in range(ii + 1, len(active)):
+            b = active[jj]
+            if crossing[a, b]:
+                interaction_points.append(crossing_point[a, b])
+                interaction_strokes.append(frozenset((a, b)))
+            for pa in (start_points[a], end_points[a]):
+                for pb in (start_points[b], end_points[b]):
+                    if np.linalg.norm(pa - pb) < JUNCTION_CONNECTION_THRESHOLD:
+                        interaction_points.append((pa + pb) / 2)
+                        interaction_strokes.append(frozenset((a, b)))
+
+    n_points = len(interaction_points)
+    if n_points == 0:
+        return 0
+    parent = list(range(n_points))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for p in range(n_points):
+        for q in range(p + 1, n_points):
+            if np.linalg.norm(interaction_points[p] - interaction_points[q]) < JUNCTION_CLUSTER_RADIUS:
+                union(p, q)
+
+    clusters: dict[int, set[int]] = {}
+    for idx in range(n_points):
+        clusters.setdefault(find(idx), set()).update(interaction_strokes[idx])
+    return sum(1 for strokes in clusters.values() if len(strokes) >= 3)
 
 
 def _crossings_and_triple_junctions(
     start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # classify_crossings/count_triple_junctionsはいずれも曲線タプルのみを受け取り、頂点+辺構造か
-    # 独立スロット表現かに依存しないため、vae_eval_common.pyからそのまま流用する。2つの指標を
-    # 1つの関数にまとめているのは、サンプルごとのcurves構築(交差判定を含み重い)を1回で
-    # 両方に使い回すため(呼び出し元は_reportのみで、ファイル間の重複排除が目的ではない)
+    # vae_eval_common.classify_crossings/count_triple_junctionsと同じ判定を、線分交差探索
+    # (最も重い部分、ストロークペア×12線分×12線分の判定)だけベクトル化して求め、3本以上合流の
+    # Union-Findクラスタリング(元々軽い)はそのままPythonループで行う。vae_crossing_geometry_v2で
+    # 実データ全件においてclassify_crossings/count_triple_junctionsと完全一致することを検証済み
+    start = torch.from_numpy(start_points).float()
+    end = torch.from_numpy(end_points).float()
+    offset = torch.from_numpy(offsets).float()
+    existence_t = torch.from_numpy(existence).float()
+
+    control = (start + end) / 2 + offset
+    points = bezier_polyline_points(start, end, control, SEGMENTS_PER_CURVE)
+    crossing, crossing_point = polyline_crossing_points(points)
+
+    delta = end - start
+    angle = torch.atan2(delta[..., 1], delta[..., 0])
+    diagonal = polyline_diagonal_involved_mask(crossing, angle, AXIS_TOLERANCE_DEG)
+
+    stroke_count = existence.shape[1]
+    upper_triangle = torch.triu(torch.ones(stroke_count, stroke_count, dtype=torch.bool), diagonal=1)
+    pair_exists = (existence_t.unsqueeze(2) * existence_t.unsqueeze(1)).bool()
+    mask = pair_exists & upper_triangle.unsqueeze(0)
+
+    total = (crossing & mask).sum(dim=(1, 2)).numpy().astype(float)
+    diag = (diagonal & mask).sum(dim=(1, 2)).numpy().astype(float)
+
+    crossing_np = crossing.numpy()
+    crossing_point_np = crossing_point.numpy()
+    existence_np = existence.astype(bool)
     n = len(start_points)
-    total = np.zeros(n)
-    diag = np.zeros(n)
     triple = np.zeros(n)
     for i in range(n):
-        mask = existence[i].astype(bool)
-        curves = stroke_curves(start_points[i], end_points[i], offsets[i], mask)
-        angles = _active_angles(start_points[i], end_points[i], mask)
-        cls = classify_crossings(curves, angles)
-        total[i] = cls["total"]
-        diag[i] = cls["diagonal_involved"]
-        triple[i] = count_triple_junctions(curves)
+        triple[i] = _triple_junction_count(
+            crossing_np[i], crossing_point_np[i], start_points[i], end_points[i], existence_np[i]
+        )
     return total, diag, triple
 
 

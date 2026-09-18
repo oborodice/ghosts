@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# ストロークを線分として扱う交差判定の幾何計算。再構成側(vae_losses_v2.py)と
-# 合成z側(vae_synthetic_losses_v2.py)の両方が、ストロークを2線分の折れ線として近似する
-# 同じ幾何を使うため、共有モジュールに切り出している
+# ストロークを線分として扱う交差判定の幾何計算。再構成側(vae_losses_v2.py)・合成z側
+# (vae_synthetic_losses_v2.py)は2線分の折れ線近似、診断側(report_generation_stats_v2.py)は
+# より精密な12分割ポリライン近似で、それぞれ同じ線分交差判定の核(pairwise_segment_intersection_params・
+# _hard_crossing_interior)を使うため、共有モジュールに切り出している
 import torch
 
 CROSSING_GATE_LOW = 0.08  # 交点パラメータt, uがこの範囲内ならストローク内部での交差とみなす(下限)。端点付近の接続点を除外する
@@ -34,6 +35,21 @@ def pairwise_segment_intersection_params(
     t = (diff[..., 0] * d2[..., 1] - diff[..., 1] * d2[..., 0]) / denom
     u = (diff[..., 0] * d1[..., 1] - diff[..., 1] * d1[..., 0]) / denom
     return t, u, degenerate
+
+
+def _hard_crossing_interior(
+    t: torch.Tensor, u: torch.Tensor, t_global: torch.Tensor, u_global: torch.Tensor, degenerate: torch.Tensor
+) -> torch.Tensor:
+    # ハード閾値の交差判定(勾配不要)。t_global, u_globalがストローク内部(端点付近の接続点を除く)に
+    # あり、かつt, uが実際の線分の範囲[0, 1]内にある(_segment_membership_gateの説明を参照、
+    # 折れ線・ポリラインで範囲外のtがグローバル位置だけの判定をすり抜けるのを防ぐ)ことを要求する。
+    # degenerateなペア(2線分がほぼ同一直線上に重なる、t, uの値が信頼できない)は判定不能として除外する
+    return (
+        (t_global > CROSSING_GATE_LOW) & (t_global < CROSSING_GATE_HIGH)
+        & (u_global > CROSSING_GATE_LOW) & (u_global < CROSSING_GATE_HIGH)
+        & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
+        & ~degenerate
+    )
 
 
 def interior_gate(t: torch.Tensor) -> torch.Tensor:
@@ -110,12 +126,7 @@ def folded_crossing_mask(start: torch.Tensor, end: torch.Tensor, mid: torch.Tens
     # 重なる退化ケース、t, uの値が信頼できない)なペアは判定不能として交差から除外する
     crossing = None
     for t, u, t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
-        interior = (
-            (t_global > CROSSING_GATE_LOW) & (t_global < CROSSING_GATE_HIGH)
-            & (u_global > CROSSING_GATE_LOW) & (u_global < CROSSING_GATE_HIGH)
-            & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
-            & ~degenerate
-        )
+        interior = _hard_crossing_interior(t, u, t_global, u_global, degenerate)
         crossing = interior if crossing is None else (crossing | interior)
     return crossing
 
@@ -130,6 +141,62 @@ def folded_crossing_strength(start: torch.Tensor, end: torch.Tensor, mid: torch.
         pair_strength = interior_gate(t_global) * interior_gate(u_global) * on_segment * (~degenerate).float()
         not_crossing = not_crossing * (1 - pair_strength)
     return 1 - not_crossing
+
+
+def bezier_polyline_points(
+    start: torch.Tensor, end: torch.Tensor, control: torch.Tensor, segment_count: int
+) -> torch.Tensor:
+    # 2次ベジェ曲線B(t) = (1-t)^2*start + 2t(1-t)*control + t^2*endを、t=0, 1/n, ..., 1の
+    # (segment_count+1)点でサンプリングする。vae_eval_common.bezier_polylineと同じ式(diagnostic側の
+    # 精密な曲線近似)をバッチ処理向けにベクトル化したもの。fold_pointが返す「中点」は制御点そのもの
+    # (曲線上の点ではない)であり、ここでのcontrolも同様に制御点を渡す必要がある
+    t = torch.linspace(0, 1, segment_count + 1, device=start.device, dtype=start.dtype)
+    t = t.view(1, 1, -1, 1)  # (1, 1, segment_count+1, 1) -- バッチ・ストローク次元へブロードキャスト
+    start_ = start.unsqueeze(2)  # (B, stroke_count, 1, 2)
+    end_ = end.unsqueeze(2)
+    control_ = control.unsqueeze(2)
+    return (1 - t) ** 2 * start_ + 2 * t * (1 - t) * control_ + t**2 * end_
+
+
+def polyline_crossing_points(points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    # vae_eval_common.classify_crossingsの交差判定(ハード閾値、勾配不要)を、pointsで表される
+    # 全ストロークのポリライン(bezier_polyline_pointsが返す(B, stroke_count, segment_count+1, 2))に
+    # 対してベクトル化して計算する。classify_crossingsは1サンプル・1ペアごとにPythonのfor文で
+    # segment_count×segment_count通りの線分交差を判定しているが、これをバッチ全体・全ストローク
+    # ペアに対して一度に計算する。診断・報告専用(学習ループのcrossing_lossは_folded_*系列を使う)。
+    # 交差の実座標(vae_eval_common._find_curve_intersectionsが返す点と同じもの、3本以上合流の
+    # クラスタリングに使う)もあわせて返す。1ペアにつき最初に見つかった(a, b)の組み合わせの交点を
+    # 採用する(_find_curve_intersectionsの「found=True; break」と同じ、a→bの順で最初に見つかった
+    # ものを採用するセマンティクスに合わせている)
+    segment_count = points.shape[2] - 1
+    batch_size, stroke_count = points.shape[0], points.shape[1]
+    crossing = torch.zeros(batch_size, stroke_count, stroke_count, dtype=torch.bool, device=points.device)
+    point = torch.zeros(batch_size, stroke_count, stroke_count, 2, dtype=points.dtype, device=points.device)
+    for a in range(segment_count):
+        seg_i_start, seg_i_end = points[:, :, a], points[:, :, a + 1]
+        for b in range(segment_count):
+            seg_j_start, seg_j_end = points[:, :, b], points[:, :, b + 1]
+            t, u, degenerate = pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
+            t_global = (a + t) / segment_count
+            u_global = (b + u) / segment_count
+            interior = _hard_crossing_interior(t, u, t_global, u_global, degenerate)
+            newly_found = interior & ~crossing
+            segment_i_direction = (seg_i_end - seg_i_start).unsqueeze(2)  # (B, stroke_count, 1, 2)
+            candidate_point = seg_i_start.unsqueeze(2) + t.unsqueeze(-1) * segment_i_direction
+            point = torch.where(newly_found.unsqueeze(-1), candidate_point, point)
+            crossing = crossing | interior
+    return crossing, point
+
+
+def polyline_diagonal_involved_mask(
+    crossing: torch.Tensor, angle: torch.Tensor, axis_tolerance_deg: float
+) -> torch.Tensor:
+    # vae_eval_common.classify_crossingsの"diagonal_involved"(交差ペアのうち、少なくとも一方が
+    # 軸方向(水平・垂直)でないもの)をベクトル化する。vae_eval_common.is_axis_alignedと同じ判定式
+    deg = torch.rad2deg(angle) % 90
+    axis_aligned = (deg < axis_tolerance_deg) | (deg > (90 - axis_tolerance_deg))
+    both_axis = axis_aligned.unsqueeze(2) & axis_aligned.unsqueeze(1)
+    return crossing & ~both_axis
 
 
 def folded_crossing_per_sample_total(
