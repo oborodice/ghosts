@@ -88,7 +88,7 @@ def _well_defined_mask(direction: torch.Tensor) -> torch.Tensor:
     return (direction.norm(dim=-1) >= MIN_DIRECTION_NORM).float()
 
 
-def _crossing_pair_weights(
+def _crossing_pair_masks(
     true_start: torch.Tensor,
     true_end: torch.Tensor,
     true_offset: torch.Tensor,
@@ -96,34 +96,49 @@ def _crossing_pair_weights(
     vertex_std: torch.Tensor,
     stroke_offset_mean: torch.Tensor,
     stroke_offset_std: torch.Tensor,
-) -> torch.Tensor:
-    # 正解データで実際に交差しているペア(才のような正当な交差)は損失の対象外にする。交差の有無自体は
-    # 不連続な事実であり勾配は不要なため、正解側の判定はハード閾値で行う。判定基準を正解側のみにするのは、
-    # 再構成側は学習途中で崩れている可能性があるため
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # 交差の有無自体は不連続な事実であり勾配は不要なため、正解側の判定はハード閾値で行う。判定基準を
+    # 正解側のみにするのは、再構成側は学習途中で崩れている可能性があるため。存在ペアを「正解で
+    # 交差していない」・「交差している(才のような正当な交差)」の排他的な2つのマスクに分けて返す。
+    # 1サンプルあたりの平均ペア数は前者が約109、後者が約2と大きく偏っているため(実測)、1つの
+    # 符号付き重みにまとめてsum()すると少数派の信号が多数派に埋もれる。呼び出し側で別々に
+    # 正規化してから合算することで、この頻度差の影響を受けないようにする
     with torch.no_grad():
         mid = fold_point(true_start, true_end, true_offset, vertex_std, stroke_offset_mean, stroke_offset_std)
-        crossing = folded_crossing_mask(true_start, true_end, mid)
-        not_crossing = (~crossing).float()
-    return off_diagonal_exist_pairs(existence) * not_crossing
+        crossing = folded_crossing_mask(true_start, true_end, mid).float()
+    exist_pair = off_diagonal_exist_pairs(existence)
+    return exist_pair * (1.0 - crossing), exist_pair * crossing
 
 
 def _weighted_crossing_penalty(
     start: torch.Tensor,
     end: torch.Tensor,
     offset: torch.Tensor,
-    weights: torch.Tensor,
+    should_not_cross_mask: torch.Tensor,
+    should_cross_mask: torch.Tensor,
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
     stroke_offset_mean: torch.Tensor,
     stroke_offset_std: torch.Tensor,
 ) -> torch.Tensor:
-    # 再構成側の交差の強さ(0〜1の連続値)を求め、ペアごとの重みを掛けて損失にする。ペアの片方でも
-    # 方向ベクトルが退化していれば、そのペアは交差判定自体が意味をなさないため対象から除外する
+    # 再構成側の交差の強さ(0〜1の連続値)を求める。正解で交差していないペアは交差強度そのものを
+    # (高いほど罰する)、交差しているペアは交差強度の不足=1-交差強度を(高いほど罰する、交差を
+    # 保つ方向の圧力)、それぞれサンプルごとのペア数で正規化した平均を取ってから合算する
+    # (単純合計ではなく平均にする理由は_crossing_pair_masks参照)。ペアの片方でも方向ベクトルが
+    # 退化していれば、そのペアは交差判定自体が意味をなさないため対象から除外する
     mid = fold_point(start, end, offset, vertex_std, stroke_offset_mean, stroke_offset_std)
     crossing_strength = folded_crossing_strength(start, end, mid)
     well_defined = _well_defined_mask(_direction_real(start, end, vertex_mean, vertex_std))
     pair_well_defined = well_defined.unsqueeze(2) * well_defined.unsqueeze(1)
-    return (weights * pair_well_defined * crossing_strength).sum(dim=(1, 2)).mean()
+
+    suppress_mask = should_not_cross_mask * pair_well_defined
+    preserve_mask = should_cross_mask * pair_well_defined
+    suppress_count = suppress_mask.sum(dim=(1, 2)).clamp(min=1.0)
+    preserve_count = preserve_mask.sum(dim=(1, 2)).clamp(min=1.0)
+
+    suppress_term = (suppress_mask * crossing_strength).sum(dim=(1, 2)) / suppress_count
+    preserve_term = (preserve_mask * (1.0 - crossing_strength)).sum(dim=(1, 2)) / preserve_count
+    return (suppress_term + preserve_term).mean()
 
 
 def _compute_crossing_loss(
@@ -139,12 +154,14 @@ def _compute_crossing_loss(
     stroke_offset_mean: torch.Tensor,
     stroke_offset_std: torch.Tensor,
 ) -> torch.Tensor:
-    # 正解で交差していないペアについて、再構成側の交差の強さにペナルティを与える
-    weights = _crossing_pair_weights(
+    # 正解で交差していないペアは再構成側の交差強度を罰し、交差しているペアは再構成側の交差強度の
+    # 不足(交差が失われていること)を罰する
+    should_not_cross_mask, should_cross_mask = _crossing_pair_masks(
         true_start, true_end, true_offset, existence, vertex_std, stroke_offset_mean, stroke_offset_std
     )
     return _weighted_crossing_penalty(
-        recon_start, recon_end, recon_offset, weights, vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std
+        recon_start, recon_end, recon_offset, should_not_cross_mask, should_cross_mask,
+        vertex_mean, vertex_std, stroke_offset_mean, stroke_offset_std,
     )
 
 
@@ -208,7 +225,7 @@ def _pairwise_vertex_distance_real(
 def _vertex_repulsion_pair_weights(
     true_vertices: torch.Tensor, vertex_existence: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
 ) -> torch.Tensor:
-    # 正解データで実際に離れている頂点ペアのみを対象にする(_crossing_pair_weightsと同じ設計:
+    # 正解データで実際に離れている頂点ペアのみを対象にする(_crossing_pair_masksと同じ設計:
     # 正解側の判定は勾配不要のハード閾値で行う)。目・日のような格子状の部首で正解上も近い頂点ペアは
     # ここで対象から除外されるため、正当な近さを壊すリスクを個別の閾値調整に頼らず構造的に避けられる
     with torch.no_grad():
