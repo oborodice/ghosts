@@ -44,6 +44,21 @@ def interior_gate(t: torch.Tensor) -> torch.Tensor:
     return low * high
 
 
+def _segment_membership_gate(t: torch.Tensor) -> torch.Tensor:
+    # tが実際の線分の範囲[0, 1]内にあるかどうかを、interior_gateと同じ発想のsigmoidの積で
+    # なめらかに近似する(0〜1の範囲そのものが対象なのでinterior_gateのCROSSING_GATE_LOW/HIGHの
+    # ような余白は取らない)。pairwise_segment_intersection_paramsが返すt, uは2直線を無限に
+    # 延長した場合の交点パラメータであり、線分の範囲外(t<0またはt>1)でも数値としては返ってくる。
+    # 複数線分の折れ線では、範囲外のtをそのままストローク全体のグローバル位置に変換すると、
+    # 別の区間の内部位置にたまたま折り返されてしまい、実際には交わっていない線分ペアを交差ありと
+    # 誤判定することがある(実測で確認済み)。単一線分(弦のみ)の判定ではグローバル位置=ローカル
+    # 位置そのものでありCROSSING_GATE_LOW/HIGH自体が範囲チェックを兼ねるため問題にならないが、
+    # 複数線分ではグローバル位置の判定だけでは不十分で、このローカルな範囲チェックが別途必要になる
+    low = torch.sigmoid(CROSSING_GATE_SHARPNESS * t)
+    high = torch.sigmoid(CROSSING_GATE_SHARPNESS * (1 - t))
+    return low * high
+
+
 def fold_point(
     start: torch.Tensor,
     end: torch.Tensor,
@@ -70,18 +85,21 @@ def _segment_global_position(local_param: torch.Tensor, segment_index: int) -> t
 
 def _folded_segment_global_positions(
     start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor
-) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     # ストロークを2線分(0: 始点->制御点、1: 制御点->終点)の折れ線として近似し、4通りの線分の
-    # 組み合わせ(前半-前半、前半-後半、後半-前半、後半-後半)それぞれについて、交点パラメータを
-    # ストローク全体スケールの位置(t_global, u_global)に変換して返す。degenerateは
-    # pairwise_segment_intersection_params参照(2線分がほぼ同一直線上に重なる退化ケース)
+    # 組み合わせ(前半-前半、前半-後半、後半-前半、後半-後半)それぞれについて、ローカルな交点
+    # パラメータ(t, u)と、それをストローク全体スケールの位置に変換した値(t_global, u_global)の
+    # 両方を返す。呼び出し側は両方を使う必要がある(t, uが線分の範囲[0, 1]内にあるかの判定と、
+    # t_global, u_globalがストローク内部(端点付近の接続点を除く)にあるかの判定は別物、
+    # _segment_membership_gate参照)。degenerateはpairwise_segment_intersection_params参照
+    # (2線分がほぼ同一直線上に重なる退化ケース)
     segments = [(start, mid), (mid, end)]
     positions = []
     for seg_i_index, (seg_i_start, seg_i_end) in enumerate(segments):
         for seg_j_index, (seg_j_start, seg_j_end) in enumerate(segments):
             t, u, degenerate = pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
             positions.append(
-                (_segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index), degenerate)
+                (t, u, _segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index), degenerate)
             )
     return positions
 
@@ -91,10 +109,11 @@ def folded_crossing_mask(start: torch.Tensor, end: torch.Tensor, mid: torch.Tens
     # 交差しているとみなす、勾配不要)で統合する。正解側の判定用。degenerate(2線分が同一直線上に
     # 重なる退化ケース、t, uの値が信頼できない)なペアは判定不能として交差から除外する
     crossing = None
-    for t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
+    for t, u, t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
         interior = (
             (t_global > CROSSING_GATE_LOW) & (t_global < CROSSING_GATE_HIGH)
             & (u_global > CROSSING_GATE_LOW) & (u_global < CROSSING_GATE_HIGH)
+            & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
             & ~degenerate
         )
         crossing = interior if crossing is None else (crossing | interior)
@@ -106,8 +125,9 @@ def folded_crossing_strength(start: torch.Tensor, end: torch.Tensor, mid: torch.
     # (ハード閾値・論理ORの微分可能な近似)で統合する。勾配が必要な側(再構成・合成z側の両方)用。
     # degenerateなペアは交差強度を強制的に0にする(folded_crossing_maskと同じ理由)
     not_crossing = 1.0
-    for t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
-        pair_strength = interior_gate(t_global) * interior_gate(u_global) * (~degenerate).float()
+    for t, u, t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
+        on_segment = _segment_membership_gate(t) * _segment_membership_gate(u)
+        pair_strength = interior_gate(t_global) * interior_gate(u_global) * on_segment * (~degenerate).float()
         not_crossing = not_crossing * (1 - pair_strength)
     return 1 - not_crossing
 
