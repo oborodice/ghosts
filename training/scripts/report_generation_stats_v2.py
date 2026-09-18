@@ -97,6 +97,12 @@ def _angle_naturalness_log_density(
     return log_density.mean().item()
 
 
+def _offset_std(offsets: np.ndarray, existence: np.ndarray) -> float:
+    # ストロークoffset(曲がり具合)の標準偏差。生成側でこの分散が実データ比で大きく潰れる現象が
+    # 12-Hの調査過程で見つかったため、都度スクリプトで個別に測るのではなく3点比較の正式な指標にする
+    return offsets[existence.astype(bool)].std()
+
+
 def _report(
     label: str,
     start_points: np.ndarray,
@@ -112,6 +118,7 @@ def _report(
     print(f"triple_junctions mean = {triple.mean():.3f}")
     print(f"angle_naturalness (log density, higher = more natural) = "
           f"{_angle_naturalness_log_density(start_points, end_points, existence, angle_gmm):.3f}")
+    print(f"offset_std = {_offset_std(offsets, existence):.4f}")
     print()
 
 
