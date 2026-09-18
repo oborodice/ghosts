@@ -1,7 +1,8 @@
 import * as ort from "onnxruntime-web";
 
 // training/scripts/export_onnx.pyが出力するVAEデコーダのONNXモデル
-const MODEL_URL = "/vae.onnx";
+// GitHub Pagesではサブパス配下に配信されるため、絶対パスではなくBASE_URLを基準にする
+const MODEL_URL = `${import.meta.env.BASE_URL}vae.onnx`;
 
 export const LATENT_DIM = 48; // training/scripts/vae_model.pyのLATENT_DIMと同じ値
 
