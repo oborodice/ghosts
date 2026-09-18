@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# ストロークを線分として扱う交差判定の幾何計算。再構成側(vae_losses_v2.py、折れ線近似)と
-# 合成z側(vae_synthetic_losses_v2.py、弦のみ)の両方から使うため、共有モジュールに切り出している
+# ストロークを線分として扱う交差判定の幾何計算。再構成側(vae_losses_v2.py)と
+# 合成z側(vae_synthetic_losses_v2.py)の両方が、ストロークを2線分の折れ線として近似する
+# 同じ幾何を使うため、共有モジュールに切り出している
 import torch
 
 CROSSING_GATE_LOW = 0.08  # 交点パラメータt, uがこの範囲内ならストローク内部での交差とみなす(下限)。端点付近の接続点を除外する
@@ -43,16 +44,91 @@ def interior_gate(t: torch.Tensor) -> torch.Tensor:
     return low * high
 
 
-def chord_crossing_per_sample_total(
-    start: torch.Tensor, end: torch.Tensor, existence: torch.Tensor, well_defined: torch.Tensor
+def fold_point(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    offset: torch.Tensor,
+    vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
 ) -> torch.Tensor:
-    # ストロークを始点・終点を結ぶ弦とみなした交差数を、サンプルごとに合計する。上三角(i<j)のみを
+    # vae_eval_common_v2.stroke_curvesが定義するベジェ制御点(弦の中点をoffset(実スケール)だけ
+    # ずらした点)を、start/endと同じ標準化頂点座標空間で求める。offsetはvertexとは別の正規化
+    # (stroke_offset_mean/std)を持つため、実スケールに変換してからvertex_stdで割ることで
+    # 頂点座標と同じアフィン変換後の空間に揃える(この空間内であれば交差判定のアフィン不変性が成り立つ)
+    offset_real = offset * stroke_offset_std + stroke_offset_mean
+    return (start + end) / 2 + offset_real / vertex_std
+
+
+def _segment_global_position(local_param: torch.Tensor, segment_index: int) -> torch.Tensor:
+    # 折れ線の線分(0: 始点->制御点、1: 制御点->終点)上のローカルなt(0〜1)を、ストローク全体を
+    # 弦一本とみなした場合と同じ0〜1スケールでの位置に変換する。制御点(曲線内部の点)がローカル
+    # パラメータの端(区間0のt=1、区間1のt=0)に来るため、変換せずinterior_gateにそのまま渡すと
+    # 曲線内部の点が本来の始点・終点と誤って同じ扱いで除外されてしまう
+    return (segment_index + local_param) / 2
+
+
+def _folded_segment_global_positions(
+    start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    # ストロークを2線分(0: 始点->制御点、1: 制御点->終点)の折れ線として近似し、4通りの線分の
+    # 組み合わせ(前半-前半、前半-後半、後半-前半、後半-後半)それぞれについて、交点パラメータを
+    # ストローク全体スケールの位置(t_global, u_global)に変換して返す。degenerateは
+    # pairwise_segment_intersection_params参照(2線分がほぼ同一直線上に重なる退化ケース)
+    segments = [(start, mid), (mid, end)]
+    positions = []
+    for seg_i_index, (seg_i_start, seg_i_end) in enumerate(segments):
+        for seg_j_index, (seg_j_start, seg_j_end) in enumerate(segments):
+            t, u, degenerate = pairwise_segment_intersection_params(seg_i_start, seg_i_end, seg_j_start, seg_j_end)
+            positions.append(
+                (_segment_global_position(t, seg_i_index), _segment_global_position(u, seg_j_index), degenerate)
+            )
+    return positions
+
+
+def folded_crossing_mask(start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor) -> torch.Tensor:
+    # 4通りの線分組み合わせを、ハード閾値・論理OR(いずれか1組でも交差していれば全体として
+    # 交差しているとみなす、勾配不要)で統合する。正解側の判定用。degenerate(2線分が同一直線上に
+    # 重なる退化ケース、t, uの値が信頼できない)なペアは判定不能として交差から除外する
+    crossing = None
+    for t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
+        interior = (
+            (t_global > CROSSING_GATE_LOW) & (t_global < CROSSING_GATE_HIGH)
+            & (u_global > CROSSING_GATE_LOW) & (u_global < CROSSING_GATE_HIGH)
+            & ~degenerate
+        )
+        crossing = interior if crossing is None else (crossing | interior)
+    return crossing
+
+
+def folded_crossing_strength(start: torch.Tensor, end: torch.Tensor, mid: torch.Tensor) -> torch.Tensor:
+    # folded_crossing_maskと同じ4通りの組み合わせを、交差強度(0〜1の連続値)の確率的OR
+    # (ハード閾値・論理ORの微分可能な近似)で統合する。勾配が必要な側(再構成・合成z側の両方)用。
+    # degenerateなペアは交差強度を強制的に0にする(folded_crossing_maskと同じ理由)
+    not_crossing = 1.0
+    for t_global, u_global, degenerate in _folded_segment_global_positions(start, end, mid):
+        pair_strength = interior_gate(t_global) * interior_gate(u_global) * (~degenerate).float()
+        not_crossing = not_crossing * (1 - pair_strength)
+    return 1 - not_crossing
+
+
+def folded_crossing_per_sample_total(
+    start: torch.Tensor,
+    end: torch.Tensor,
+    offset: torch.Tensor,
+    existence: torch.Tensor,
+    well_defined: torch.Tensor,
+    vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
+) -> torch.Tensor:
+    # ストロークをoffset付きの折れ線として近似した交差数を、サンプルごとに合計する。上三角(i<j)のみを
     # 対象にして各ペアを1回だけ数え、両ストロークが存在し(existence)かつ両方が退化していない
     # (well_defined)ペアに限定する。crossingの頻度を集計統計として扱う損失・目標値の計算
     # (vae_data_v2._compute_crossing_targets、vae_synthetic_losses_v2._compute_synthetic_crossing_loss)
     # で共通して使う
-    t, u, degenerate = pairwise_segment_intersection_params(start, end, start, end)
-    strength = interior_gate(t) * interior_gate(u) * (~degenerate).float()
+    mid = fold_point(start, end, offset, vertex_std, stroke_offset_mean, stroke_offset_std)
+    strength = folded_crossing_strength(start, end, mid)
 
     stroke_count = strength.shape[1]
     upper_triangle = torch.triu(

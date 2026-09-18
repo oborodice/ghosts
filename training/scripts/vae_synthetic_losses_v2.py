@@ -4,7 +4,7 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 
-from vae_crossing_geometry_v2 import chord_crossing_per_sample_total
+from vae_crossing_geometry_v2 import folded_crossing_per_sample_total
 from vae_eval_common import KERNEL_BANDWIDTH
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import VAE, DecoderOutput
@@ -98,27 +98,28 @@ def _compute_synthetic_crossing_loss(
     mu: torch.Tensor,
     mu_pool: torch.Tensor,
     vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
     target_mean: float,
     target_std: float,
 ) -> torch.Tensor:
-    # 合成サンプル1つあたりの交差数(始点・終点を結ぶ弦のみの判定。vae_data_v2.
-    # _compute_crossing_targetsと同じ判定方法)を求め、バッチ内の平均・標準偏差を実データ全体の
-    # 固定目標値に近づけるmoment matching損失(旧`vae_synthetic_losses.py`の
-    # `_length_moment_matching_loss`と発想は同じだが、二乗誤差ではなくHuber損失を使う。理由は
-    # _huberのコメントを参照)。折れ線ではなく弦のみを使う理由・目標値の算出方法は
-    # vae_data_v2._compute_crossing_targetsのコメントを参照。
-    # detach_slots=False: crossingは頂点配置(vertex_features)自体を教える必要がある損失であり、
-    # self_loop_lossのようにポインタ選択だけを教えたいわけではない。detach_slots=Trueにすると
-    # 勾配がvertex_feature_headという共有Linear層1つ(かつ再構成側vertex_lossの勾配に支配される)
-    # までしか届かず、crossings統計が全く動かないことを実測で確認済み。再構成側への軽微な副作用
-    # (crossing_loss/vertex_repulsion_lossの値が上昇)は確認済みだが、本番学習・3点比較で許容範囲か
-    # 最終確認する
+    # 合成サンプル1つあたりの交差数(offsetを使った折れ線近似。vae_data_v2._compute_crossing_targets
+    # と同じ判定方法)を求め、バッチ内の平均・標準偏差を実データ全体の固定目標値に近づけるmoment
+    # matching損失(旧`vae_synthetic_losses.py`の`_length_moment_matching_loss`と発想は同じだが、
+    # 二乗誤差ではなくHuber損失を使う。理由は_huberのコメントを参照)。
+    # start/endをdetachしoffsetのみ勾配を通すのは、offsetレバー設計: 頂点座標(start/end)は
+    # 再構成側のvertex_lossが強く教師する量であり、crossing_lossにも動かせてしまうと頂点配置を
+    # 経由して他ストロークとの接続関係を壊す副作用が大きいことを実測で確認済み。offset(曲がり具合)
+    # は頂点配置と独立に交差を作れるレバーであり、この損失専用に使わせても副作用が小さい
     decoder_output = _decode_synthetic_batch(model, mu, mu_pool, detach_slots=False)
     existence = _synthetic_existence_mask(decoder_output.stroke_existence_logits)
-    start, end = decoder_output.start_points, decoder_output.end_points
+    start, end = decoder_output.start_points.detach(), decoder_output.end_points.detach()
+    offset = decoder_output.stroke_offsets
 
     well_defined = (((end - start) * vertex_std).norm(dim=-1) >= MIN_DIRECTION_NORM).float()
-    per_sample_total = chord_crossing_per_sample_total(start, end, existence, well_defined)
+    per_sample_total = folded_crossing_per_sample_total(
+        start, end, offset, existence, well_defined, vertex_std, stroke_offset_mean, stroke_offset_std
+    )
     batch_mean = per_sample_total.mean()
     batch_std = per_sample_total.std()
     return _huber(batch_mean - target_mean, target_std) + _huber(batch_std - target_std, target_std)
@@ -129,6 +130,8 @@ def compute_synthetic_loss(
     mu: torch.Tensor,
     mu_pool: torch.Tensor,
     vertex_std: torch.Tensor,
+    stroke_offset_mean: torch.Tensor,
+    stroke_offset_std: torch.Tensor,
     target_crossings_mean: float,
     target_crossings_std: float,
 ) -> SyntheticLossComponents:
@@ -144,7 +147,8 @@ def compute_synthetic_loss(
     losses: dict[str, torch.Tensor] = {}
     losses["self_loop_loss"] = _compute_self_loop_loss(model, mu, mu_pool)
     losses["crossing_loss"] = _compute_synthetic_crossing_loss(
-        model, mu, mu_pool, vertex_std, target_crossings_mean, target_crossings_std
+        model, mu, mu_pool, vertex_std, stroke_offset_mean, stroke_offset_std,
+        target_crossings_mean, target_crossings_std,
     )
 
     # ここに列挙のない損失は暗黙的に重み1.0として扱う

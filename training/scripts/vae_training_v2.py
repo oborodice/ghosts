@@ -102,7 +102,8 @@ def _forward_and_compute_loss(
         ctx.stroke_offset_mean, ctx.stroke_offset_std, ctx.angle_gmm,
     )
     synthetic_loss = compute_synthetic_loss(
-        model, mu, mu_pool, ctx.vertex_std, ctx.target_crossings_mean, ctx.target_crossings_std,
+        model, mu, mu_pool, ctx.vertex_std, ctx.stroke_offset_mean, ctx.stroke_offset_std,
+        ctx.target_crossings_mean, ctx.target_crossings_std,
     )
     total = recon_loss.total + synthetic_loss.total
     return total, recon_loss, synthetic_loss

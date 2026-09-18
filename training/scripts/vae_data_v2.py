@@ -7,7 +7,7 @@ import torch
 from sklearn.mixture import GaussianMixture
 from torch.utils.data import TensorDataset
 
-from vae_crossing_geometry_v2 import chord_crossing_per_sample_total
+from vae_crossing_geometry_v2 import folded_crossing_per_sample_total
 from vae_data import AngleGMMParams
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import ModelShape
@@ -84,17 +84,19 @@ def _fit_angle_gmm(
 def _compute_crossing_targets(
     vertices: np.ndarray,
     stroke_vertex_indices: np.ndarray,
+    stroke_offsets: np.ndarray,
     stroke_existence: np.ndarray,
     train_indices: np.ndarray,
 ) -> tuple[float, float]:
-    # 合成z側crossing損失(moment matching)の目標値。損失側と同じ判定(弦のみ、上三角、
-    # existence/well-defined込み)をtrain splitの正解データに適用して一度だけ計算する
-    # (_fit_angle_gmmと同じ設計: 標準化前の実スケールのverticesをそのまま使う)。曲線の曲がり
-    # (offset)を考慮した折れ線近似ではなく弦のみを使うのは、この損失が個々のペアの正誤ではなく
-    # 集計頻度を狙うものであり、折れ線近似(4通りの線分ペアの確率的OR)は実データでの目標値が
-    # 精密測定の2.76倍に水増しされる(検証済み)ため
+    # 合成z側crossing損失(moment matching)の目標値。損失側と同じ判定(offsetを使った折れ線近似、
+    # 上三角、existence/well-defined込み)をtrain splitの正解データに適用して一度だけ計算する
+    # (_fit_angle_gmmと同じ設計: 標準化前の実スケールのvertices/stroke_offsetsをそのまま使う)。
+    # 損失側がoffsetレバー(頂点座標をdetachし、曲がり具合offsetのみを交差生成の手段として使う設計。
+    # vae_synthetic_losses_v2._compute_synthetic_crossing_loss参照)であるため、目標値も同じ
+    # 折れ線近似(vae_crossing_geometry_v2.folded_crossing_per_sample_total)で測る必要がある
     train_vertices = torch.tensor(vertices[train_indices], dtype=torch.float32)
     train_stroke_vertex_indices = torch.tensor(stroke_vertex_indices[train_indices], dtype=torch.int64)
+    train_stroke_offsets = torch.tensor(stroke_offsets[train_indices], dtype=torch.float32)
     train_stroke_existence = torch.tensor(stroke_existence[train_indices], dtype=torch.float32)
 
     feature_dim = train_vertices.shape[-1]
@@ -104,7 +106,15 @@ def _compute_crossing_targets(
     end = torch.gather(train_vertices, 1, end_index)
 
     well_defined = ((end - start).norm(dim=-1) >= MIN_DIRECTION_NORM).float()
-    per_sample_total = chord_crossing_per_sample_total(start, end, train_stroke_existence, well_defined)
+    # folded_crossing_per_sample_totalは標準化済みのstart/end/offsetを受け取り、渡された
+    # vertex_std/stroke_offset_mean/stdで実スケールへ戻す設計だが、ここではvertices/stroke_offsets
+    # が既に実スケールのため、恒等変換(平均0・標準偏差1)を渡して素通りさせる
+    identity_mean = torch.zeros(feature_dim)
+    identity_std = torch.ones(feature_dim)
+    per_sample_total = folded_crossing_per_sample_total(
+        start, end, train_stroke_offsets, train_stroke_existence, well_defined,
+        identity_std, identity_mean, identity_std,
+    )
     return per_sample_total.mean().item(), per_sample_total.std().item()
 
 
@@ -153,7 +163,7 @@ def prepare_datasets() -> Datasets:
     stroke_offsets_standardized = _standardize(stroke_offsets, stroke_offset_mean, stroke_offset_std)
     angle_gmm_params = _fit_angle_gmm(vertices, stroke_vertex_indices, stroke_existence, train_indices)
     target_crossings_mean, target_crossings_std = _compute_crossing_targets(
-        vertices, stroke_vertex_indices, stroke_existence, train_indices
+        vertices, stroke_vertex_indices, stroke_offsets, stroke_existence, train_indices
     )
 
     train_dataset = _build_dataset(
