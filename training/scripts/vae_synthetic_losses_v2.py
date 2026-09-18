@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from vae_crossing_geometry_v2 import chord_crossing_per_sample_total
+from vae_eval_common import KERNEL_BANDWIDTH
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import VAE, DecoderOutput
 
@@ -19,7 +20,6 @@ class SyntheticLossComponents(NamedTuple):
     crossing_loss: torch.Tensor
 
 
-SYNTHETIC_BANDWIDTH = 0.6  # Nadaraya-Watson推定量の帯域。正式な値は今後のsweepで決める暫定値
 SYNTHETIC_EXISTENCE_THRESHOLD = 0.5  # 合成データの予測existenceをマスク化する閾値
 SELF_LOOP_LOSS_WEIGHT = 1.0  # 1本のストロークの始点・終点ポインタが同じ頂点を指してしまう自己ループ
 # (実データでは常に0%、混ぜ合わせ生成時に特有の現象)を抑制する。既存コードに対応物が存在しない
@@ -28,13 +28,14 @@ SYNTHETIC_CROSSING_WEIGHT = 1.0  # 生成側crossings頻度を実データの頻
 # 既存コードに対応物が存在しない新規の損失のため暫定値とする
 
 
-def _attract_batch(z_raw: torch.Tensor, mu_batch: torch.Tensor, bandwidth: float) -> torch.Tensor:
-    # Nadaraya-Watson推定量でz_rawをmu_batch(バッチ内の実データのmu、呼び出し元でdetach済み)へ
-    # 引き寄せ、複数の実在字の潜在表現を混ぜた合成zを作る。decoderへ勾配を通す必要があるため
-    # no_gradにはしない
-    dist_sq = torch.cdist(z_raw, mu_batch) ** 2
+def _attract_batch(z_raw: torch.Tensor, mu_pool: torch.Tensor, bandwidth: float) -> torch.Tensor:
+    # Nadaraya-Watson推定量でz_rawをmu_pool(訓練データ全体のmu、エポック単位でキャッシュ済み・
+    # detach済み)へ引き寄せ、複数の実在字の潜在表現を混ぜた合成zを作る。本番の生成時に使う
+    # vae_eval_common.attract_to_latent_priorと全く同じ計算(候補プール・bandwidthとも本番と統一)。
+    # decoderへ勾配を通す必要があるためno_gradにはしない
+    dist_sq = torch.cdist(z_raw, mu_pool) ** 2
     weights = torch.softmax(-dist_sq / (2 * bandwidth * bandwidth), dim=1)
-    return weights @ mu_batch
+    return weights @ mu_pool
 
 
 def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
@@ -44,11 +45,13 @@ def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
         return (torch.sigmoid(existence_logits) > SYNTHETIC_EXISTENCE_THRESHOLD).float()
 
 
-def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, detach_slots: bool) -> DecoderOutput:
-    # バッチ内の実データのmuへランダムなz_rawを引き寄せた合成zを構築してdecodeする。
-    # 合成z側の損失(self_loop・crossing)がいずれも最初に行う共通処理
-    z_raw = torch.randn_like(mu)
-    z_synthetic = _attract_batch(z_raw, mu.detach(), SYNTHETIC_BANDWIDTH)
+def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor, detach_slots: bool) -> DecoderOutput:
+    # 訓練データ全体のmu(mu_pool、呼び出し元でエポック単位にキャッシュ・detach済み)へランダムな
+    # z_rawを引き寄せた合成zを構築してdecodeする。合成z側の損失(self_loop・crossing)がいずれも
+    # 最初に行う共通処理。z_rawの件数はmu(このバッチの実データ数)に合わせるが、引き寄せ先はmu_poolであり
+    # このバッチ自体ではない
+    z_raw = torch.randn(mu.shape[0], mu_pool.shape[1], device=mu_pool.device)
+    z_synthetic = _attract_batch(z_raw, mu_pool, KERNEL_BANDWIDTH)
     return model.decode(z_synthetic, detach_slots=detach_slots)
 
 
@@ -64,14 +67,14 @@ def _compute_self_loop_penalty(
     return (collision_probability * existence).sum(dim=1).mean()
 
 
-def _compute_self_loop_loss(model: VAE, mu: torch.Tensor) -> torch.Tensor:
-    # バッチ内の実データのmuへランダムなz_rawを引き寄せた合成zをdecodeし、自己ループへの
+def _compute_self_loop_loss(model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor) -> torch.Tensor:
+    # 訓練データ全体のmu_poolへランダムなz_rawを引き寄せた合成zをdecodeし、自己ループへの
     # ペナルティを計算する。重み乗算前の生の値を返す。
     # detach_slots=True: この損失が本来教師すべきなのはポインタの各headの重みだけであり、
     # vertex_features等と共有されているTransformer出力(slots)自体を変える必要はない。
     # detachしないと、混ぜ合わせz(実データより自由度が高い領域)での学習を通じて、
     # 共有されたslotsを経由し頂点座標側に意図しない副作用(過剰接続の悪化)が漏れることを実測で確認済み
-    decoder_output = _decode_synthetic_batch(model, mu, detach_slots=True)
+    decoder_output = _decode_synthetic_batch(model, mu, mu_pool, detach_slots=True)
     existence = _synthetic_existence_mask(decoder_output.stroke_existence_logits)
     return _compute_self_loop_penalty(
         decoder_output.start_pointer_logits, decoder_output.end_pointer_logits, existence
@@ -91,7 +94,12 @@ def _huber(residual: torch.Tensor, delta: float) -> torch.Tensor:
 
 
 def _compute_synthetic_crossing_loss(
-    model: VAE, mu: torch.Tensor, vertex_std: torch.Tensor, target_mean: float, target_std: float
+    model: VAE,
+    mu: torch.Tensor,
+    mu_pool: torch.Tensor,
+    vertex_std: torch.Tensor,
+    target_mean: float,
+    target_std: float,
 ) -> torch.Tensor:
     # 合成サンプル1つあたりの交差数(始点・終点を結ぶ弦のみの判定。vae_data_v2.
     # _compute_crossing_targetsと同じ判定方法)を求め、バッチ内の平均・標準偏差を実データ全体の
@@ -105,7 +113,7 @@ def _compute_synthetic_crossing_loss(
     # までしか届かず、crossings統計が全く動かないことを実測で確認済み。再構成側への軽微な副作用
     # (crossing_loss/vertex_repulsion_lossの値が上昇)は確認済みだが、本番学習・3点比較で許容範囲か
     # 最終確認する
-    decoder_output = _decode_synthetic_batch(model, mu, detach_slots=False)
+    decoder_output = _decode_synthetic_batch(model, mu, mu_pool, detach_slots=False)
     existence = _synthetic_existence_mask(decoder_output.stroke_existence_logits)
     start, end = decoder_output.start_points, decoder_output.end_points
 
@@ -119,20 +127,24 @@ def _compute_synthetic_crossing_loss(
 def compute_synthetic_loss(
     model: VAE,
     mu: torch.Tensor,
+    mu_pool: torch.Tensor,
     vertex_std: torch.Tensor,
     target_crossings_mean: float,
     target_crossings_std: float,
 ) -> SyntheticLossComponents:
     # model自体を使って混ぜ合わせzをdecodeする必要があり、vae_losses_v2.compute_lossが受け取る
-    # decoder_output(再構成側のdecode結果)だけでは完結しないため別枠にしている。
+    # decoder_output(再構成側のdecode結果)だけでは完結しないため別枠にしている。mu_poolは訓練データ
+    # 全体のmu(呼び出し元でエポック単位にキャッシュ・detach済み)で、本番の生成が引き寄せ先として
+    # 使うattract_to_latent_priorの候補プールと同じもの。muはこのバッチの実データのmuで、合成zを
+    # 何件作るか(z_rawの件数)を揃えるためだけに使う。
     # lossesは重み乗算前の生の値。個々の損失を追加するたびに(a)このdictへの1行(b)重みが1.0以外
     # ならweightsへの1行、の2箇所を触るだけで済む(vae_losses_v2.compute_lossと同じ設計)。
     # self_loop_loss(detach_slots=True)とcrossing_loss(detach_slots=False)は必要なdetach設定が
     # 異なるため、decodeを共有せずそれぞれ独立に合成zを構築・decodeする
     losses: dict[str, torch.Tensor] = {}
-    losses["self_loop_loss"] = _compute_self_loop_loss(model, mu)
+    losses["self_loop_loss"] = _compute_self_loop_loss(model, mu, mu_pool)
     losses["crossing_loss"] = _compute_synthetic_crossing_loss(
-        model, mu, vertex_std, target_crossings_mean, target_crossings_std
+        model, mu, mu_pool, vertex_std, target_crossings_mean, target_crossings_std
     )
 
     # ここに列挙のない損失は暗黙的に重み1.0として扱う

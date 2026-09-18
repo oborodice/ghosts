@@ -67,6 +67,19 @@ def _compute_beta(epoch: int, beta: float, kl_annealing_epochs: int) -> float:
     return beta * min(1.0, epoch / kl_annealing_epochs)
 
 
+def _encode_train_mu_pool(model: VAE, datasets: Datasets, shape: ModelShape, device: torch.device) -> torch.Tensor:
+    # 訓練データ全体を一度にエンコードし、合成z側の損失が引き寄せ先として使うmuの候補プールを作る。
+    # 本番の生成(vae_eval_common.attract_to_latent_prior)が訓練データ全体を候補にするのと揃えるため。
+    # 毎ステップ全データをエンコードするコストを避けるため、エポック単位(train呼び出し元で1回)で
+    # キャッシュして使い回す近似にする(エポック内でのmuの変化は小さいと想定)。ここで計算した値は
+    # 呼び出し元に戻さず引き寄せ先としてのみ使うため勾配は不要
+    with torch.no_grad():
+        tensors = tuple(t.to(device) for t in datasets.train.tensors)
+        x = flatten_input(*tensors, shape)
+        mu_pool, _ = model.encode(x)
+    return mu_pool
+
+
 def _forward_and_compute_loss(
     model: VAE,
     batch: tuple[torch.Tensor, ...],
@@ -74,6 +87,7 @@ def _forward_and_compute_loss(
     device: torch.device,
     beta: float,
     ctx: LossContext,
+    mu_pool: torch.Tensor,
 ) -> tuple[torch.Tensor, LossComponents, SyntheticLossComponents]:
     # 1バッチ分のforward計算と、再構成側(LossComponents)・混ぜ合わせz側(SyntheticLossComponents)
     # 両方の損失計算をまとめる。学習対象の合計は両者のtotalの和
@@ -88,7 +102,7 @@ def _forward_and_compute_loss(
         ctx.stroke_offset_mean, ctx.stroke_offset_std, ctx.angle_gmm,
     )
     synthetic_loss = compute_synthetic_loss(
-        model, mu, ctx.vertex_std, ctx.target_crossings_mean, ctx.target_crossings_std,
+        model, mu, mu_pool, ctx.vertex_std, ctx.target_crossings_mean, ctx.target_crossings_std,
     )
     total = recon_loss.total + synthetic_loss.total
     return total, recon_loss, synthetic_loss
@@ -111,6 +125,7 @@ def _run_epoch(
     optimizer: optim.Optimizer | None,
     beta: float,
     ctx: LossContext,
+    mu_pool: torch.Tensor,
 ) -> tuple[LossComponents, SyntheticLossComponents]:
     # optimizerがNoneのとき(validation時)は重み更新を行わないeval modeとして扱う
     is_training = optimizer is not None
@@ -120,7 +135,9 @@ def _run_epoch(
     synthetic_totals = {field: 0.0 for field in SyntheticLossComponents._fields}
     with torch.set_grad_enabled(is_training):
         for batch in loader:
-            total, recon_loss, synthetic_loss = _forward_and_compute_loss(model, batch, shape, device, beta, ctx)
+            total, recon_loss, synthetic_loss = _forward_and_compute_loss(
+                model, batch, shape, device, beta, ctx, mu_pool
+            )
 
             if optimizer is not None:
                 optimizer.zero_grad()
@@ -201,12 +218,16 @@ def train(
 
     for epoch in range(1, max_epochs + 1):
         beta_epoch = _compute_beta(epoch, beta, kl_annealing_epochs)
+        # 合成z側の損失が引き寄せ先として使うmuの候補プールをエポック単位でキャッシュする。
+        # train・val両方のこのエポック中の合成損失計算で使い回す(val側もわずかに古いmu_poolになるが、
+        # 毎エポック1回の全データエンコードで十分という前提は_encode_train_mu_pool参照)
+        mu_pool = _encode_train_mu_pool(state.model, datasets, datasets.shape, device)
         train_losses, train_synthetic = _run_epoch(
-            state.train_loader, state.model, datasets.shape, device, state.optimizer, beta_epoch, state.ctx
+            state.train_loader, state.model, datasets.shape, device, state.optimizer, beta_epoch, state.ctx, mu_pool
         )
         # 早期終了・チェックポイント選定はannealing中でも比較可能にするため、常に最終的なβ(=beta)で評価する
         val_losses, val_synthetic = _run_epoch(
-            state.val_loader, state.model, datasets.shape, device, None, beta, state.ctx
+            state.val_loader, state.model, datasets.shape, device, None, beta, state.ctx, mu_pool
         )
         # 学習対象・early stopping判定に使う実際の合計は、再構成側・混ぜ合わせz側それぞれのtotalの和
         train_total = train_losses.total + train_synthetic.total
