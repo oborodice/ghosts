@@ -10,8 +10,8 @@ import torch
 from vae_checkpoint_v2 import load_checkpoint
 from vae_data_v2 import SEED, Datasets, prepare_datasets
 from vae_eval_common_v2 import ACTIVE_UNIT_THRESHOLD, kl_per_dim, vertex_distance_real
-from vae_model_v2 import HIDDEN_DIMS, LATENT_DIM, flatten_input, select_device, unflatten_output
-from vae_training_v2 import BETA, KL_ANNEALING_EPOCHS, SLOT_ATTENTION_CONFIG, train
+from vae_model_v2 import HIDDEN_DIMS, LATENT_DIM, flatten_input, select_device
+from vae_training_v2 import BETA, GUMBEL_TEMPERATURE, KL_ANNEALING_EPOCHS, SLOT_ATTENTION_CONFIG, train
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent.parent / "data" / "checkpoints"
 
@@ -44,15 +44,22 @@ def _evaluate_candidate(checkpoint_path: Path, datasets: Datasets, device: torch
     # 戻り値: (実座標スケールの頂点距離の平均, dead次元数, 潜在次元数)。train()が返すbest_val_lossは
     # beta依存のため使わず、保存済みチェックポイントを読み込んでbeta非依存の指標を計算し直す
     checkpoint = load_checkpoint(device, checkpoint_path)
-    val_vertices_std, val_existence = (t.to(device) for t in datasets.val.tensors)
+    vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence = (
+        t.to(device) for t in datasets.val.tensors
+    )
 
     with torch.no_grad():
-        mu, logvar = checkpoint.model.encode(flatten_input(val_vertices_std, val_existence))
-        vertices_recon, _ = unflatten_output(checkpoint.model.decode(mu), checkpoint.shape)
+        x = flatten_input(
+            vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence, checkpoint.shape
+        )
+        mu, logvar = checkpoint.model.encode(x)
+        decoder_output = checkpoint.model.decode(mu)
 
     kl = kl_per_dim(mu, logvar)
     dead_dims = int((kl < ACTIVE_UNIT_THRESHOLD).sum().item())
-    distance = vertex_distance_real(val_vertices_std, val_existence, vertices_recon, checkpoint.mean, checkpoint.std)
+    distance = vertex_distance_real(
+        vertices, vertex_existence, decoder_output.vertex_features, checkpoint.vertex_mean, checkpoint.vertex_std
+    )
     return float(distance.mean()), dead_dims, len(kl)
 
 
@@ -78,6 +85,7 @@ def main() -> None:
             hidden_dims=candidate.hidden_dims,
             latent_dim=candidate.latent_dim,
             slot_attention_config=SLOT_ATTENTION_CONFIG,
+            gumbel_temperature=GUMBEL_TEMPERATURE,
             beta=candidate.beta,
             kl_annealing_epochs=candidate.kl_annealing_epochs,
             checkpoint_path=checkpoint_path,
