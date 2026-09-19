@@ -4,6 +4,7 @@ from typing import NamedTuple
 import torch
 import torch.nn.functional as F
 
+from extract_stroke_features_v2 import CONNECTION_THRESHOLD
 from vae_crossing_geometry_v2 import fold_point, folded_crossing_mask, folded_crossing_strength
 from vae_losses import AngleGMM, angle_log_density, off_diagonal_exist_pairs
 from vae_model_v2 import DecoderOutput
@@ -41,7 +42,6 @@ MIN_LENGTH_LOSS_WEIGHT = 1.0  # 交差抑制損失・角度自然さ損失はい
 # この抜け道は個々の損失の除外条件を直そうとするより、ストローク自体の縮小に独立してペナルティを
 # 与える方が両方の損失に共通して効く。既存コードに対応物が存在しない新規の損失のため暫定値とする
 
-VERTEX_REPULSION_THRESHOLD = 4.0  # 端点接続判定の閾値と同じ(extract_stroke_features_v2.CONNECTION_THRESHOLD)
 VERTEX_REPULSION_LOSS_WEIGHT = 1.0  # 交差抑制損失が「無関係な頂点同士を寄せる」ことで過剰接続
 # (3本以上合流)を悪化させる副作用への対応として追加。ablationで、頂点参照数ベースの代替案
 # (多重参照抑制損失)より明確に効果が高いことを確認済み(index単位ではなく座標単位でペナルティを
@@ -230,7 +230,7 @@ def _vertex_repulsion_pair_weights(
     # ここで対象から除外されるため、正当な近さを壊すリスクを個別の閾値調整に頼らず構造的に避けられる
     with torch.no_grad():
         true_distance = _pairwise_vertex_distance_real(true_vertices, vertex_mean, vertex_std)
-        far_in_truth = (true_distance > VERTEX_REPULSION_THRESHOLD).float()
+        far_in_truth = (true_distance > CONNECTION_THRESHOLD).float()
     return off_diagonal_exist_pairs(vertex_existence) * far_in_truth
 
 
@@ -241,12 +241,12 @@ def _compute_vertex_repulsion_loss(
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
 ) -> torch.Tensor:
-    # 正解で離れているはずの頂点ペアが、再構成でVERTEX_REPULSION_THRESHOLD未満まで近づいたら
+    # 正解で離れているはずの頂点ペアが、再構成でCONNECTION_THRESHOLD未満まで近づいたら
     # ペナルティを与える。crossing/angleと異なりストロークの端点(points)ではなく頂点スロット
     # (vertex_features)自体を直接動かす損失であり、ポインタの選択を経由しないためdetachは不要
     weights = _vertex_repulsion_pair_weights(true_vertices, vertex_existence, vertex_mean, vertex_std)
     recon_distance = _pairwise_vertex_distance_real(recon_vertices, vertex_mean, vertex_std)
-    penalty = torch.clamp(VERTEX_REPULSION_THRESHOLD - recon_distance, min=0.0)
+    penalty = torch.clamp(CONNECTION_THRESHOLD - recon_distance, min=0.0)
     return (weights * penalty).sum(dim=(1, 2)).mean()
 
 

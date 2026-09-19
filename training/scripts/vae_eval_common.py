@@ -7,6 +7,7 @@ import torch
 from matplotlib.path import Path as MplPath
 from matplotlib.patches import PathPatch
 
+from extract_stroke_features_v2 import CONNECTION_THRESHOLD
 from vae_checkpoint import Checkpoint
 from vae_data import load_stroke_features, split_train_val_indices, standardize
 from vae_model import flatten_input, unflatten_output
@@ -103,7 +104,6 @@ def strokes_to_curves(
 SEGMENTS_PER_CURVE = 12  # ベジェ曲線をポリライン近似する際の線分数
 INTERIOR_RANGE = (0.08, 0.92)  # ストローク端点付近(接続点)を交差から除外する範囲
 AXIS_TOLERANCE_DEG = 15.0  # 0/90/180/270度からこの範囲内なら「軸方向(水平・垂直)」とみなす
-JUNCTION_CONNECTION_THRESHOLD = 4.0  # 3本以上合流の検出用。extract_stroke_features.CONNECTION_THRESHOLDと同じ
 JUNCTION_CLUSTER_RADIUS = 6.0  # 接続点・交差点同士を「同じ場所」とみなす半径
 
 
@@ -191,7 +191,7 @@ def find_interaction_points(curves: list[tuple[complex, complex, complex]]) -> l
         for j in range(i + 1, n):
             for pi in endpoints[i]:
                 for pj in endpoints[j]:
-                    if np.linalg.norm(pi - pj) < JUNCTION_CONNECTION_THRESHOLD:
+                    if np.linalg.norm(pi - pj) < CONNECTION_THRESHOLD:
                         points.append(((pi + pj) / 2, frozenset((i, j))))
 
     for i, j, point in _find_curve_intersections(curves):

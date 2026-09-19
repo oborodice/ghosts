@@ -6,13 +6,13 @@
 import numpy as np
 import torch
 
+from extract_stroke_features_v2 import CONNECTION_THRESHOLD
 from vae_checkpoint_v2 import load_checkpoint
 from vae_crossing_geometry_v2 import bezier_polyline_points, polyline_crossing_points, polyline_diagonal_involved_mask
 from vae_data_v2 import prepare_datasets
 from vae_eval_common import (
     AXIS_TOLERANCE_DEG,
     JUNCTION_CLUSTER_RADIUS,
-    JUNCTION_CONNECTION_THRESHOLD,
     SEGMENTS_PER_CURVE,
     attract_to_latent_prior,
     existence_mask_from_logits,
@@ -32,7 +32,6 @@ from vae_synthetic_losses import masked_mean_std
 
 SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値(歴史的な比較のため)
 SEED = 0
-CONNECTION_THRESHOLD = 4.0  # 頂点クラスタリング時に「同じ頂点」とみなす実スケール距離の閾値と揃え、孤立判定の基準をデータ構築時の定義と一致させる
 
 
 def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray) -> float:
@@ -75,7 +74,7 @@ def _triple_junction_count(
                 interaction_strokes.append(frozenset((a, b)))
             for pa in (start_points[a], end_points[a]):
                 for pb in (start_points[b], end_points[b]):
-                    if np.linalg.norm(pa - pb) < JUNCTION_CONNECTION_THRESHOLD:
+                    if np.linalg.norm(pa - pb) < CONNECTION_THRESHOLD:
                         interaction_points.append((pa + pb) / 2)
                         interaction_strokes.append(frozenset((a, b)))
 

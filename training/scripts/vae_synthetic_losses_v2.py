@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from vae_crossing_geometry_v2 import folded_crossing_per_sample_total
-from vae_eval_common import KERNEL_BANDWIDTH
+from vae_eval_common import EXISTENCE_THRESHOLD, KERNEL_BANDWIDTH
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import VAE, DecoderOutput
 
@@ -20,7 +20,6 @@ class SyntheticLossComponents(NamedTuple):
     crossing_loss: torch.Tensor
 
 
-SYNTHETIC_EXISTENCE_THRESHOLD = 0.5  # 合成データの予測existenceをマスク化する閾値
 SELF_LOOP_LOSS_WEIGHT = 1.0  # 1本のストロークの始点・終点ポインタが同じ頂点を指してしまう自己ループ
 # (実データでは常に0%、混ぜ合わせ生成時に特有の現象)を抑制する。既存コードに対応物が存在しない
 # 新規の損失のため暫定値とする
@@ -42,7 +41,7 @@ def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
     # 合成データには正解のexistenceが存在しないため、モデル自身の予測値をマスクとして使う。
     # マスクは離散的な採用判定であり勾配は不要なためdetachする
     with torch.no_grad():
-        return (torch.sigmoid(existence_logits) > SYNTHETIC_EXISTENCE_THRESHOLD).float()
+        return (torch.sigmoid(existence_logits) > EXISTENCE_THRESHOLD).float()
 
 
 def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor, detach_slots: bool) -> DecoderOutput:
