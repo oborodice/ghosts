@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # 既定値での単発学習CLI・複数候補を比較するsweep CLIの両方から呼ばれる学習ロジック本体
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import torch
 import torch.optim as optim
@@ -206,9 +206,12 @@ def train(
     batch_size: int = BATCH_SIZE,
     patience: int = PATIENCE,
     max_epochs: int = MAX_EPOCHS,
+    on_epoch_end: Callable[[int, VAE, LossContext], None] | None = None,
 ) -> float:
     # ハイパーパラメータを引数として受け取ることで、既定値での単発学習・候補ごとの比較学習(sweep)の
-    # 両方が同じ学習ロジックを呼び出せるようにしている。戻り値はearly stopping時点のbest validation loss
+    # 両方が同じ学習ロジックを呼び出せるようにしている。戻り値はearly stopping時点のbest validation loss。
+    # on_epoch_endは、long runの安全網としてbest val loss更新とは無関係にエポックのスナップショットを
+    # 残したい呼び出し元向けのオプションのフック(既定Noneなら本番の挙動に一切影響しない)
     state = _build_training_state(
         datasets, device, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature,
         learning_rate, batch_size,
@@ -238,7 +241,8 @@ def train(
             f"train breakdown: vertex={train_losses.vertex_loss:.4f} kl={train_losses.kl_divergence:.4f} "
             f"crossing={train_losses.crossing_loss:.4f} angle={train_losses.angle_naturalness_loss:.4f} "
             f"min_length={train_losses.min_length_loss:.4f} repulsion={train_losses.vertex_repulsion_loss:.4f} "
-            f"self_loop={train_synthetic.self_loop_loss:.4f} synthetic_crossing={train_synthetic.crossing_loss:.4f}"
+            f"self_loop={train_synthetic.self_loop_loss:.4f} synthetic_crossing={train_synthetic.crossing_loss:.4f} "
+            f"start_pointer={train_losses.start_pointer_loss:.4f} end_pointer={train_losses.end_pointer_loss:.4f}"
         )
 
         if val_total < best_val_loss:
@@ -254,5 +258,8 @@ def train(
             if epochs_without_improvement >= patience:
                 print(f"Early stopping at epoch {epoch} (patience={patience})")
                 break
+
+        if on_epoch_end is not None:
+            on_epoch_end(epoch, state.model, state.ctx)
 
     return best_val_loss
