@@ -63,9 +63,10 @@ $ uv run scripts/sweep_vae_v2.py
 # 典型的な4字に加え、頂点の再構成誤差が最悪だった字も表示する
 $ uv run scripts/visualize_reconstruction_v2.py
 
-# 混ぜ合わせ生成(事前分布サンプル+attract_to_latent_prior)時の孤立率・3本以上合流・交差を、
-# report_generation_stats.pyと揃えた方法で数値化する。あわせて、頂点の重複スロットが3本以上合流の
-# カウントを狂わせていないかも確認する
+# 混ぜ合わせ生成(事前分布サンプル+attract_to_latent_prior)時の孤立率・3本以上合流・交差・角度の
+# 自然さ・offset分散・ストローク長を、実データ・reconstructionと比較できる一貫した方法で数値化する。
+# あわせて、頂点の重複スロットが3本以上合流のカウントを狂わせていないか、ポインタの構造的な破綻
+# (自己ループ・幽霊参照)の頻度も確認する
 $ uv run scripts/report_generation_stats_v2.py
 
 # 混ぜ合わせ生成でのモーフィング中、ストロークのポインタ(始点・終点の参照先頂点)の割り当てが

@@ -28,10 +28,11 @@ from vae_eval_common_v2 import (
 from vae_losses import AngleGMM, angle_log_density, build_angle_gmm
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import select_device
+from vae_synthetic_losses import masked_mean_std
 
 SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値(歴史的な比較のため)
 SEED = 0
-CONNECTION_THRESHOLD = 4.0  # extract_stroke_features_v2.CONNECTION_THRESHOLDと同じ
+CONNECTION_THRESHOLD = 4.0  # 頂点クラスタリング時に「同じ頂点」とみなす実スケール距離の閾値と揃え、孤立判定の基準をデータ構築時の定義と一致させる
 
 
 def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray) -> float:
@@ -60,7 +61,8 @@ def _triple_junction_count(
 ) -> int:
     # 3本以上合流の検出。交差点(crossing/crossing_pointとしてベクトル化済み)と端点同士の近接
     # (ここではPythonのまま、ストローク数に対してO(n^2)だが定数が小さく軽い)を同じ「交点」として
-    # 扱い、Union-Find(vae_eval_common.count_triple_junctionsと同じアルゴリズム)でクラスタリングする
+    # 扱い、近接する交点同士をUnion-Findで1つのクラスタにまとめた上で、そのクラスタに関与する
+    # ストローク数を数える(1つのクラスタに3本以上のストロークが絡んでいれば3本以上合流とみなす)
     active = np.where(mask)[0]
     interaction_points = []
     interaction_strokes = []
@@ -107,10 +109,9 @@ def _triple_junction_count(
 def _crossings_and_triple_junctions(
     start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # vae_eval_common.classify_crossings/count_triple_junctionsと同じ判定を、線分交差探索
-    # (最も重い部分、ストロークペア×12線分×12線分の判定)だけベクトル化して求め、3本以上合流の
-    # Union-Findクラスタリング(元々軽い)はそのままPythonループで行う。vae_crossing_geometry_v2で
-    # 実データ全件においてclassify_crossings/count_triple_junctionsと完全一致することを検証済み
+    # 線分交差探索(最も重い部分、ストロークペア×12線分×12線分の判定)だけベクトル化して求め、
+    # 3本以上合流のUnion-Findクラスタリング(元々軽い)はそのままPythonループで行う。この
+    # ベクトル化版は、実データ全件において素朴なループ実装と完全に同じ結果を返すことを検証済み
     start = torch.from_numpy(start_points).float()
     end = torch.from_numpy(end_points).float()
     offset = torch.from_numpy(offsets).float()
@@ -160,9 +161,22 @@ def _angle_naturalness_log_density(
 
 
 def _offset_std(offsets: np.ndarray, existence: np.ndarray) -> float:
-    # ストロークoffset(曲がり具合)の標準偏差。生成側でこの分散が実データ比で大きく潰れる現象が
-    # 12-Hの調査過程で見つかったため、都度スクリプトで個別に測るのではなく3点比較の正式な指標にする
+    # ストロークoffset(曲がり具合)の標準偏差。生成側でこの分散が実データ比で大きく潰れやすいため、
+    # 都度スクリプトで個別に測るのではなく3点比較の正式な指標にする
     return offsets[existence.astype(bool)].std()
+
+
+def _stroke_length(start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray) -> float:
+    # ストローク長(実スケールでの始点・終点間距離)の平均。生成側でこれが実データ比で大きく縮みやすいため、
+    # 都度スクリプトで個別に測るのではなく3点比較の正式な指標にする。ストローク数1以下の字は平均が
+    # 単一ストロークの値に支配されてしまうため、count<2の字を除外した上で字ごとの平均を平均する
+    # (全ストロークをフラットにプールした平均ではない)
+    length = np.linalg.norm(end_points - start_points, axis=-1)
+    mean, _, count = masked_mean_std(
+        torch.from_numpy(length).float(), torch.from_numpy(existence.astype("float32"))
+    )
+    valid = count >= 2
+    return mean[valid].mean().item()
 
 
 def _report(
@@ -181,6 +195,7 @@ def _report(
     print(f"angle_naturalness (log density, higher = more natural) = "
           f"{_angle_naturalness_log_density(start_points, end_points, existence, angle_gmm):.3f}")
     print(f"offset_std = {_offset_std(offsets, existence):.4f}")
+    print(f"stroke_length mean = {_stroke_length(start_points, end_points, existence):.3f}")
     print()
 
 
@@ -189,7 +204,7 @@ def _pointer_targets(logits: torch.Tensor) -> np.ndarray:
 
 
 def _self_loop_rate(start_index: np.ndarray, end_index: np.ndarray, existence: np.ndarray) -> float:
-    # v2のポインタ機構(始点・終点を独立に離散選択する)固有の失敗モード。正解データでは
+    # 始点・終点の頂点ポインタを独立に離散選択する機構固有の失敗モード。正解データでは
     # 始点・終点は必ず異なる頂点を指すため、両者が同じ頂点を指すことは長さ0の自己参照ストロークを意味する
     self_loop = (start_index == end_index) & existence
     return 100 * self_loop.sum() / existence.sum() if existence.sum() else float("nan")
@@ -225,9 +240,9 @@ def _report_pointer_integrity(
 def _duplicate_pair_real_distances(
     vertex_features: torch.Tensor, existence_mask: torch.Tensor, vertex_mean: torch.Tensor, vertex_std: torch.Tensor
 ) -> np.ndarray:
-    # 重複スロットと判定されたペアに絞って、実スケールでの距離を集める
-    # (標準化後の判定閾値DUPLICATE_POSITION_THRESHOLDでは、3本以上合流のクラスタリング半径
-    # JUNCTION_CLUSTER_RADIUSと直接比較できないため)
+    # 重複スロットと判定されたペアに絞って、実スケールでの距離を集める。重複判定自体は標準化後の
+    # 座標空間の閾値で行われているため、実スケールのクラスタリング半径(JUNCTION_CLUSTER_RADIUS)と
+    # 直接比較するには、ここで距離を実スケールに変換し直す必要がある
     distances = []
     for sample_idx in range(vertex_features.shape[0]):
         active_indices = existence_mask[sample_idx].nonzero(as_tuple=True)[0]
