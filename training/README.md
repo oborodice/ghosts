@@ -72,6 +72,11 @@ $ uv run scripts/report_generation_stats_v2.py
 # フレーム間でどれだけ安定しているかを、ソフトポインタ版・ハードポインタ版のチェックポイントで比較する
 $ uv run scripts/visualize_pointer_morph_v2.py
 
+# 本物/偽物を、数値特徴量ではなく実際にレンダリングした画像で判別する診断分類器。頂点+ストローク構造
+# (vae_v2.pt)の生成結果に対して使う。数値特徴量では見えている差異が、人間の視覚に近い形
+# (低解像度・軽いぼかし)でも見分けられるかを確認する
+$ uv run scripts/evaluate_generation_realism_visual_v2.py
+
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する。
 # 接続点周辺は文字全体の表示では崩れが見えづらいため、個別にズームインした図も表示する
 $ uv run scripts/visualize_reconstruction.py
