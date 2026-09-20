@@ -11,6 +11,10 @@ $ uv sync
 # KanjiVG (https://kanjivg.tagaini.net/, CC BY-SA 3.0) データセットの取得
 # data/kanjivg/配下にSVGファイルが展開される(取得済みの場合は再ダウンロードをスキップする)
 $ ./scripts/download_kanjivg.sh
+
+# RunPodへのデプロイスクリプト(scripts/runpod_*.sh)が、pod作成時のJSON出力から
+# id・IP・ポートを取り出すために使う
+$ brew install jq
 ```
 
 ## 実行手順
@@ -108,4 +112,32 @@ $ uv run scripts/visualize_latent_interpolation.py
 # (web側で読み込めるよう、生成用zの実データへのカーネル重み付け・decode・標準化の逆変換・existenceの
 # Sigmoidまでを1つのグラフに含める)
 $ uv run scripts/export_onnx.py
+```
+
+## RunPodへのデプロイ
+
+- 外部GPU( [RunPod](https://www.runpod.io/) 、RTX 4090)でフルスケール学習を実行するためのスクリプト
+- 初回のみ、RunPodアカウントの作成、 `runpodctl` のセットアップ(APIキー・SSH鍵)、Network Volumeの作成が別途必要
+
+```sh
+# pod作成(Network Volume ID指定)。SSH接続確認・マウント確認まで行い、pod_id/ip/portを表示する。
+# GPU機種が同じでもCPU側の当たり外れがあるため、シングルスレッドの簡易ベンチマークも実行する
+$ ./scripts/runpod_create_pod.sh <network-volume-id> [pod-name]
+
+# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncする。初回のみ--with-dataでデータも送る。
+# アブレーション等で本番のtraining/scripts以外(スクラッチコピー)を送りたい場合は--sourceで指定する
+$ ./scripts/runpod_deploy_code.sh <ip> <port> [--with-data] [--source <local-dir>]
+
+# 学習をnohup+disownでバックグラウンド起動する(中断からの再開はremote-resume-pathを指定)
+$ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path]
+
+# 学習プロセスが動いているか・train.logの直近n行を確認する(train.logはNetwork Volume単位で
+# 永続化されるため、プロセスが動いていないのに前回の内容が表示されることがある点に注意)
+$ ./scripts/runpod_check_progress.sh <ip> <port> [n-lines]
+
+# チェックポイント・train.logをダウンロードする(省略時は最新のチェックポイントを対象にする)
+$ ./scripts/runpod_download_results.sh <ip> <port> [remote-checkpoint-name|latest] [local-name]
+
+# podを削除して課金を止める(Network Volumeは残る)
+$ ./scripts/runpod_terminate.sh <pod-id>
 ```
