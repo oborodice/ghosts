@@ -47,8 +47,12 @@ $ uv run scripts/finetune_synthetic_stats.py
 $ uv run scripts/evaluate_vae.py
 
 # 頂点+ストローク全体(頂点座標MSE+existence BCE+ストロークのポインタ分類cross entropy+オフセットMSE+
-# existence BCE+KL)でVAEを学習し、data/checkpoints/vae_v2.ptへ保存する
+# existence BCE+KL)でVAEを学習する。保存先は既存ファイルとの衝突を避けるため起動時刻ベースの
+# ファイル名(data/checkpoints/vae_<timestamp>.pt)になる(他のスクリプトが読むvae_v2.ptを
+# 更新する場合は、確認の上で手動でコピー・リネームする)。長時間の学習が途中で落ちた場合は、
+# 同時に保存される<出力先>_resume.ptを--resumeに指定して続きから再開できる
 $ uv run scripts/train_vae_v2.py
+$ uv run scripts/train_vae_v2.py --resume data/checkpoints/vae_<timestamp>_resume.pt
 
 # 学習済みモデル(vae_v2.pt)の品質を数値で確認する
 # (損失の内訳、潜在次元ごとのKL、重みの健全性、validation全体の誤差分布(頂点の標準化スケール・実座標

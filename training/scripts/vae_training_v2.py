@@ -21,6 +21,7 @@ from vae_model_v2 import (
     SlotAttentionConfig,
     flatten_input,
 )
+from vae_resume_v2 import ResumeState, load_resume_state, resume_state_path, save_resume_state
 from vae_synthetic_losses_v2 import SyntheticLossComponents, compute_synthetic_loss
 
 SLOT_ATTENTION_CONFIG = SlotAttentionConfig(
@@ -167,6 +168,37 @@ class _TrainingState(NamedTuple):
     ctx: LossContext
 
 
+def _assert_resume_matches_hyperparameters(
+    resume_state: ResumeState,
+    hidden_dims: tuple[int, int],
+    latent_dim: int,
+    slot_attention_config: SlotAttentionConfig,
+    gumbel_temperature: float,
+) -> None:
+    # 呼び出し元が渡したハイパーパラメータが、resume_fromに実際に保存されていたものと食い違ったまま
+    # 進むと、以後保存するチェックポイント・再開状態のメタデータが実際のモデル構造とズレてしまう。
+    # 数時間かけた学習の終盤でこれに気づくことがないよう、再開直後に検証して早期に失敗させる。
+    # SlotAttentionConfigはNamedTuple(=tupleのサブクラス)なので、値が同じであれば要素ごとの
+    # tuple変換なしでもそのまま比較できる
+    expected = (hidden_dims, latent_dim, slot_attention_config, gumbel_temperature)
+    actual = (
+        resume_state.hidden_dims, resume_state.latent_dim,
+        resume_state.slot_attention_config, resume_state.gumbel_temperature,
+    )
+    assert expected == actual, f"hyperparameters saved in resume_from {actual} do not match the caller's {expected}"
+
+
+def _build_loaders(datasets: Datasets, batch_size: int) -> tuple[DataLoader, DataLoader]:
+    train_loader = DataLoader(
+        datasets.train,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=torch.Generator().manual_seed(SEED),
+    )
+    val_loader = DataLoader(datasets.val, batch_size=batch_size, shuffle=False)
+    return train_loader, val_loader
+
+
 def _build_training_state(
     datasets: Datasets,
     device: torch.device,
@@ -177,18 +209,49 @@ def _build_training_state(
     learning_rate: float,
     batch_size: int,
 ) -> _TrainingState:
-    train_loader = DataLoader(
-        datasets.train,
-        batch_size=batch_size,
-        shuffle=True,
-        generator=torch.Generator().manual_seed(SEED),
-    )
-    val_loader = DataLoader(datasets.val, batch_size=batch_size, shuffle=False)
-
+    train_loader, val_loader = _build_loaders(datasets, batch_size)
     model = VAE(datasets.shape, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     ctx = _build_loss_context(datasets, device)
     return _TrainingState(model, optimizer, train_loader, val_loader, ctx)
+
+
+class _RunInit(NamedTuple):
+    state: _TrainingState
+    start_epoch: int
+    best_val_loss: float
+    epochs_without_improvement: int
+
+
+def _initialize_run(
+    datasets: Datasets,
+    device: torch.device,
+    hidden_dims: tuple[int, int],
+    latent_dim: int,
+    slot_attention_config: SlotAttentionConfig,
+    gumbel_temperature: float,
+    learning_rate: float,
+    batch_size: int,
+    resume_from: Path | None,
+) -> _RunInit:
+    # resume_fromが指定された場合、そこに保存された学習状態(モデル重み・optimizer状態・epoch数)
+    # から続きを学習する。長時間のフルスケール学習が途中で落ちた場合に、ゼロからのやり直しを避けるため
+    if resume_from is not None:
+        resume_state = load_resume_state(datasets.shape, device, learning_rate, resume_from)
+        _assert_resume_matches_hyperparameters(
+            resume_state, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature
+        )
+        train_loader, val_loader = _build_loaders(datasets, batch_size)
+        ctx = _build_loss_context(datasets, device)
+        state = _TrainingState(resume_state.model, resume_state.optimizer, train_loader, val_loader, ctx)
+        start_epoch = resume_state.epoch + 1
+        print(f"Resumed from {resume_from} at epoch {start_epoch} (best_val_loss={resume_state.best_val_loss:.4f})")
+        return _RunInit(state, start_epoch, resume_state.best_val_loss, resume_state.epochs_without_improvement)
+
+    state = _build_training_state(
+        datasets, device, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature, learning_rate, batch_size
+    )
+    return _RunInit(state, 1, float("inf"), 0)
 
 
 def train(
@@ -207,20 +270,19 @@ def train(
     patience: int = PATIENCE,
     max_epochs: int = MAX_EPOCHS,
     on_epoch_end: Callable[[int, VAE, LossContext], None] | None = None,
+    resume_from: Path | None = None,
 ) -> float:
     # ハイパーパラメータを引数として受け取ることで、既定値での単発学習・候補ごとの比較学習(sweep)の
     # 両方が同じ学習ロジックを呼び出せるようにしている。戻り値はearly stopping時点のbest validation loss。
     # on_epoch_endは、long runの安全網としてbest val loss更新とは無関係にエポックのスナップショットを
-    # 残したい呼び出し元向けのオプションのフック(既定Noneなら本番の挙動に一切影響しない)
-    state = _build_training_state(
+    # 残したい呼び出し元向けのオプションのフック(既定Noneなら本番の挙動に一切影響しない)。
+    state, start_epoch, best_val_loss, epochs_without_improvement = _initialize_run(
         datasets, device, hidden_dims, latent_dim, slot_attention_config, gumbel_temperature,
-        learning_rate, batch_size,
+        learning_rate, batch_size, resume_from,
     )
+    resume_path = resume_state_path(checkpoint_path)
 
-    best_val_loss = float("inf")
-    epochs_without_improvement = 0
-
-    for epoch in range(1, max_epochs + 1):
+    for epoch in range(start_epoch, max_epochs + 1):
         beta_epoch = _compute_beta(epoch, beta, kl_annealing_epochs)
         # 合成z側の損失が引き寄せ先として使うmuの候補プールをエポック単位でキャッシュする。
         # train・val両方のこのエポック中の合成損失計算で使い回す(val側もわずかに古いmu_poolになるが、
@@ -255,9 +317,15 @@ def train(
             )
         else:
             epochs_without_improvement += 1
-            if epochs_without_improvement >= patience:
-                print(f"Early stopping at epoch {epoch} (patience={patience})")
-                break
+
+        save_resume_state(
+            state.model, state.optimizer, epoch, best_val_loss, epochs_without_improvement,
+            hidden_dims, latent_dim, slot_attention_config, gumbel_temperature, resume_path,
+        )
+
+        if epochs_without_improvement >= patience:
+            print(f"Early stopping at epoch {epoch} (patience={patience})")
+            break
 
         if on_epoch_end is not None:
             on_epoch_end(epoch, state.model, state.ctx)
