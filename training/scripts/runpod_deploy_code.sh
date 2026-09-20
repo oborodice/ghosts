@@ -7,11 +7,15 @@ set -euo pipefail
 # (アブレーション用のスクラッチディレクトリはコードのみでデータを複製していないため)
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 REMOTE_DIR="/workspace/ghosts/training"
-# uvはデフォルトでPythonインタプリタ・パッケージキャッシュを/root配下(コンテナ固有のエフェメラルディスク)に
-# 置くため、Network Volumeを使い回して新しいpodを作っても再ダウンロードが発生する(.venvへのシンボリック
-# リンクが指す先が新しいコンテナに存在しないため)。/workspace配下(Network Volume上)に固定することで、
-# 同じVolumeを使う限りインタプリタ・キャッシュを再利用できるようにする(リモート側の環境変数として渡す)
-UV_ENV_VARS="UV_PYTHON_INSTALL_DIR=/workspace/.uv-python UV_CACHE_DIR=/workspace/.uv-cache"
+# uvはデフォルトでPythonインタプリタを/root配下(コンテナ固有のエフェメラルディスク)に置くため、
+# Network Volumeを使い回して新しいpodを作ると、venv自体(training/.venv、Volume上にあり中身は
+# 残っている)へのシンボリックリンクが指す先だけ存在しなくなり、再ダウンロードが発生する。
+# インタプリタだけ/workspace配下(Network Volume上)に固定すれば十分で、venv本体は元から
+# Volume上にあるため再インストールは走らない(リモート側の環境変数として渡す)。
+# パッケージのダウンロードキャッシュ(UV_CACHE_DIR)は永続化しない: このファイルシステムでは
+# ハードリンクが効かず(uv実行時に"Failed to hardlink files"の警告が出る)、キャッシュとvenvが
+# 別々にフルコピーされるため、永続化すると数GB〜10GB規模でNetwork Volumeを圧迫する
+UV_ENV_VARS="UV_PYTHON_INSTALL_DIR=/workspace/.uv-python"
 
 usage() {
   echo "Usage: $0 <ip> <port> [--with-data] [--source <local-dir>]" >&2

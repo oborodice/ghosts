@@ -6,8 +6,8 @@ set -euo pipefail
 # ローカルのsshコマンド自体が学習終了まで返ってこなくなる(学習プロセスへの影響はない)
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 REMOTE_DIR="/workspace/ghosts/training"
-# runpod_deploy_code.shでNetwork Volume上に固定したPythonインタプリタ・キャッシュの場所と一致させる
-UV_ENV_VARS="UV_PYTHON_INSTALL_DIR=/workspace/.uv-python UV_CACHE_DIR=/workspace/.uv-cache"
+# runpod_deploy_code.shでNetwork Volume上に固定したPythonインタプリタの場所と一致させる
+UV_ENV_VARS="UV_PYTHON_INSTALL_DIR=/workspace/.uv-python"
 
 if [ "$#" -lt 2 ]; then
   echo "Usage: $0 <ip> <port> [remote-resume-path]" >&2
