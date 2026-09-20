@@ -12,8 +12,15 @@ import torch
 
 from vae_checkpoint_v2 import Checkpoint, load_checkpoint
 from vae_data_v2 import prepare_datasets
-from vae_eval_common import attract_to_latent_prior, draw_curves, existence_mask_from_logits
-from vae_eval_common_v2 import encode_batch, load_batch, reconstructed_strokes_real, stroke_curves, to_real_scale
+from vae_eval_common import draw_curves, existence_mask_from_logits
+from vae_eval_common_v2 import (
+    attract_to_latent_prior,
+    encode_batch,
+    load_batch,
+    reconstructed_strokes_real,
+    stroke_curves,
+    to_real_scale,
+)
 from vae_model_v2 import CHECKPOINT_PATH, VAE, DecoderOutput, ModelShape, SlotAttentionConfig, select_device
 from vae_training_v2 import GUMBEL_TEMPERATURE
 

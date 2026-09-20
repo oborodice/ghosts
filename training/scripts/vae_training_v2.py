@@ -32,7 +32,10 @@ BETA = 0.25  # posterior collapse(潜在次元の大部分が死んで再構成�
 # 複数候補を比較して選んだ暫定値(正式な最適値探しは今後別途行う)
 KL_ANNEALING_EPOCHS = 60  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)
 GUMBEL_TEMPERATURE = 1.0  # Straight-Through Gumbel-Softmaxの温度。標準的な既定値を暫定採用(正式な調整は今後別途行う)
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 2e-4  # パラメータ数が数倍に増えたモデルに対して、既存コードから引き継いだ1e-3のままでは
+# 大きすぎ、ポインタ機構(始点・終点の頂点選択)の学習を明確に悪化させることを実測で確認済み。
+# 軽量な継続学習での検証でポインタ分類精度・crossings・angle_naturalness・isolated_stroke_rateが
+# いずれも回復した値を採用する
 BATCH_SIZE = 64
 PATIENCE = 20
 MAX_EPOCHS = 1000  # early stoppingが正常なら到達しない安全上限

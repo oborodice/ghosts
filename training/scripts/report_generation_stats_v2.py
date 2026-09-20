@@ -14,10 +14,10 @@ from vae_eval_common import (
     AXIS_TOLERANCE_DEG,
     JUNCTION_CLUSTER_RADIUS,
     SEGMENTS_PER_CURVE,
-    attract_to_latent_prior,
     existence_mask_from_logits,
 )
 from vae_eval_common_v2 import (
+    attract_to_latent_prior,
     duplicate_slot_pairs,
     encode_batch,
     load_batch,

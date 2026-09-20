@@ -13,10 +13,11 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from vae_checkpoint_v2 import Checkpoint, load_checkpoint
 from vae_data_v2 import prepare_datasets
-from vae_eval_common import SEGMENTS_PER_CURVE, attract_to_latent_prior, bezier_polyline, existence_mask_from_logits
+from vae_eval_common import SEGMENTS_PER_CURVE, bezier_polyline, existence_mask_from_logits
 from vae_eval_common_v2 import (
     Batch,
     RealScaleStrokes,
+    attract_to_latent_prior,
     encode_batch,
     load_batch,
     reconstructed_strokes_real,

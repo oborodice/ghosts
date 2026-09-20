@@ -12,6 +12,24 @@ from vae_model_v2 import DecoderOutput, flatten_input
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
 DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ未満なら、デコーダが同じ頂点を複数スロットに重複して割り当てているとみなす閾値
 
+# 生成時にzを実データへ引き寄せるカーネル幅。次元数が多いほど同じbandwidthでもsoftmax重みが均一化し
+# (次元の呪い)、実質的な近傍点数(=生成の新規性)が変わってしまうため、潜在次元数を倍増する前の構成と
+# 同程度の有効サンプル数になるよう逆算した値(LATENT_DIMを変える場合は再計算が必要)
+KERNEL_BANDWIDTH = 1.2
+
+
+def attract_to_pool(z_raw: torch.Tensor, pool: torch.Tensor, bandwidth: float) -> torch.Tensor:
+    # Nadaraya-Watson推定量(重み付き平均)でz_rawをpoolへ引き寄せる。学習時の合成z構築・生成時の
+    # 両方がこの関数を経由することで、2つの実装が食い違う(過去に実際に起きた)ことを構造的に防ぐ
+    dist_sq = torch.cdist(z_raw, pool) ** 2
+    weights = torch.softmax(-dist_sq / (2 * bandwidth * bandwidth), dim=1)
+    return weights @ pool
+
+
+@torch.no_grad()
+def attract_to_latent_prior(z_raw: torch.Tensor, mu_real: torch.Tensor) -> torch.Tensor:
+    return attract_to_pool(z_raw, mu_real, KERNEL_BANDWIDTH)
+
 
 class Batch(NamedTuple):
     vertices: torch.Tensor

@@ -5,7 +5,8 @@ import torch
 import torch.nn.functional as F
 
 from vae_crossing_geometry_v2 import folded_crossing_per_sample_total
-from vae_eval_common import EXISTENCE_THRESHOLD, KERNEL_BANDWIDTH
+from vae_eval_common import EXISTENCE_THRESHOLD
+from vae_eval_common_v2 import KERNEL_BANDWIDTH, attract_to_pool
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import VAE, DecoderOutput
 
@@ -27,16 +28,6 @@ SYNTHETIC_CROSSING_WEIGHT = 1.0  # 生成側crossings頻度を実データの頻
 # 既存コードに対応物が存在しない新規の損失のため暫定値とする
 
 
-def _attract_batch(z_raw: torch.Tensor, mu_pool: torch.Tensor, bandwidth: float) -> torch.Tensor:
-    # Nadaraya-Watson推定量でz_rawをmu_pool(訓練データ全体のmu、エポック単位でキャッシュ済み・
-    # detach済み)へ引き寄せ、複数の実在字の潜在表現を混ぜた合成zを作る。本番の生成時に使う
-    # vae_eval_common.attract_to_latent_priorと全く同じ計算(候補プール・bandwidthとも本番と統一)。
-    # decoderへ勾配を通す必要があるためno_gradにはしない
-    dist_sq = torch.cdist(z_raw, mu_pool) ** 2
-    weights = torch.softmax(-dist_sq / (2 * bandwidth * bandwidth), dim=1)
-    return weights @ mu_pool
-
-
 def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
     # 合成データには正解のexistenceが存在しないため、モデル自身の予測値をマスクとして使う。
     # マスクは離散的な採用判定であり勾配は不要なためdetachする
@@ -48,9 +39,9 @@ def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor,
     # 訓練データ全体のmu(mu_pool、呼び出し元でエポック単位にキャッシュ・detach済み)へランダムな
     # z_rawを引き寄せた合成zを構築してdecodeする。合成z側の損失(self_loop・crossing)がいずれも
     # 最初に行う共通処理。z_rawの件数はmu(このバッチの実データ数)に合わせるが、引き寄せ先はmu_poolであり
-    # このバッチ自体ではない
+    # このバッチ自体ではない。decoderへ勾配を通す必要があるためno_gradにはしない
     z_raw = torch.randn(mu.shape[0], mu_pool.shape[1], device=mu_pool.device)
-    z_synthetic = _attract_batch(z_raw, mu_pool, KERNEL_BANDWIDTH)
+    z_synthetic = attract_to_pool(z_raw, mu_pool, KERNEL_BANDWIDTH)
     return model.decode(z_synthetic, detach_slots=detach_slots)
 
 
