@@ -12,7 +12,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# 未チューニングで据え置いている値。再構成精度に問題があれば見直す
+# 未チューニングで据え置いている値。有効性は他の損失重み(頂点反発損失等)との組み合わせで変わりうる
+# ことを実測で確認済みのため、正式な値は他の重みと合わせたsweepで決める。なお、保存済みチェックポイントは
+# 学習時点のhidden_dims/latent_dim/slot_attention_configを保持しており、このファイルの現在値には追従しない
 HIDDEN_DIMS: tuple[int, int] = (1024, 512)
 LATENT_DIM = 48
 
