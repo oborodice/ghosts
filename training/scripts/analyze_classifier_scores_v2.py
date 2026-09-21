@@ -76,6 +76,19 @@ def _logistic_regression_auc(labels: np.ndarray, *indicator_dicts: dict[str, np.
     return roc_auc_score(labels, predicted)
 
 
+def _discordant_pairs(auc: float, n_real: int, n_fake: int) -> float:
+    # AUCは「ランダムな正例・負例ペアのうち正しく順位付けできた割合」という意味を持つため、
+    # (1-AUC)×正例数×負例数で不一致ペア数(タイは0.5単位で数えられる)を直接求められる。
+    # 天井付近のAUC同士を比較するとき、この実数のほうがAUCの差が意味を持つかを判断しやすい
+    return (1.0 - auc) * n_real * n_fake
+
+
+def _probability_quantiles(probs: np.ndarray) -> str:
+    quantile_points = [0, 1, 5, 25, 50, 75, 95, 99, 100]
+    values = np.percentile(probs, quantile_points)
+    return " ".join(f"p{q}={v:.4f}" for q, v in zip(quantile_points, values))
+
+
 def main() -> None:
     args = _parse_args()
     device = select_device()
@@ -125,17 +138,30 @@ def main() -> None:
     print()
 
     # _combineがreal→fakeの順で連結しているため、ラベルも同じ順で揃える
-    labels = np.concatenate([np.ones(len(true_strokes.start)), np.zeros(len(fake_strokes.start))])
-    print("=== AUC comparison ===")
-    print(f"image classifier: auc={roc_auc_score(labels, probs):.5f}")
+    n_real, n_fake = len(true_strokes.start), len(fake_strokes.start)
+    labels = np.concatenate([np.ones(n_real), np.zeros(n_fake)])
+    aucs = {
+        "image classifier": roc_auc_score(labels, probs),
+        "logistic regression (known indicators only)": _logistic_regression_auc(labels, known_indicators),
+        "logistic regression (known indicators + confounds)": _logistic_regression_auc(
+            labels, known_indicators, confounds
+        ),
+    }
     print(
-        "logistic regression (known indicators only): "
-        f"auc={_logistic_regression_auc(labels, known_indicators):.5f}"
+        "=== AUC comparison "
+        "(with discordant pair counts, since AUCs alone can look identical near the ceiling) ==="
     )
+    for name, auc in aucs.items():
+        discordant = _discordant_pairs(auc, n_real, n_fake)
+        print(f"{name}: auc={auc:.5f} discordant_pairs≈{discordant:.0f} (of {n_real * n_fake})")
+    print()
+
     print(
-        "logistic regression (known indicators + confounds): "
-        f"auc={_logistic_regression_auc(labels, known_indicators, confounds):.5f}"
+        "=== classifier probability distribution "
+        "(real vs. fake should separate at the extremes under a ceiling effect) ==="
     )
+    print(f"real: {_probability_quantiles(probs[:n_real])}")
+    print(f"fake: {_probability_quantiles(probs[n_real:])}")
 
 
 if __name__ == "__main__":
