@@ -5,66 +5,24 @@ import argparse
 from pathlib import Path
 from typing import NamedTuple
 
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image, ImageDraw, ImageFilter
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 
 from vae_checkpoint_v2 import Checkpoint, load_checkpoint
+from vae_classifier_dataset_v2 import CANVAS_SIZE, render_batch, sample_fake_strokes
+from vae_classifier_model_v2 import HIDDEN_CHANNELS, ImageClassifier, save_classifier
 from vae_data_v2 import prepare_datasets
-from vae_eval_common import SEGMENTS_PER_CURVE, bezier_polyline, existence_mask_from_logits
-from vae_eval_common_v2 import (
-    Batch,
-    RealScaleStrokes,
-    attract_to_latent_prior,
-    encode_batch,
-    load_batch,
-    reconstructed_strokes_real,
-    stroke_curves,
-    true_strokes_real,
-)
+from vae_eval_common_v2 import Batch, encode_batch, load_batch, true_strokes_real
 from vae_model_v2 import CHECKPOINT_PATH, select_device
 
-NEAREST_REAL_FILTER_THRESHOLD = 1.0  # これより実在字に近い生成サンプルは、ラベルの矛盾(ほぼ同じ入力なのに本物・偽物の両方に現れる)を避けるため除外する
-VIEWBOX_SIZE = 109.0  # KanjiVGのSVGのviewBoxサイズ(データの座標系そのもの。training/data/kanjivg/*.svg参照)
-# 診断用レンダリング解像度。フロントエンドの実装(描画バッファのサイズなど)がどうなっているかは切り離し、
-# 「小さいアイコン程度の表示サイズで見てもなお判別できてしまうか」を確認するための値を、それ単体で
-# 妥当かどうかで直接決める(目視で崩れず読み取れることを確認済み)
-CANVAS_SIZE = 128
-LINE_WIDTH = 4  # 字全体に対して自然な太さになるよう目視で選んだ値
-BLUR_RADIUS = 0.5  # ラスタライズ特有のジャギー(輪郭のギザつき)を均し、サブピクセル単位の情報を分類器に渡さないための軽いぼかし
-HIDDEN_CHANNELS = (16, 32)  # 「小さいCNN」で十分という判断(既存の数値特徴量分類器と同程度のパラメータ規模感)
 DECISION_THRESHOLD = 0.5
 LEARNING_RATE = 1e-3
 BATCH_SIZE = 64
 MAX_EPOCHS = 200
 PATIENCE = 15
 SEED = 0
-
-
-class _ImageClassifier(nn.Module):
-    def __init__(self, image_size: int, hidden_channels: tuple[int, int]) -> None:
-        super().__init__()
-        c1, c2 = hidden_channels
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, c1, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(c1, c2, 3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-        )
-        # プーリング段数からの手計算(image_size // 4)は、self.convの構成を変えたときに追従し忘れて
-        # 形状不一致を起こしやすいため、実際に1回通して畳み込み後のサイズを直接求める
-        with torch.no_grad():
-            conv_out_features = self.conv(torch.zeros(1, 1, image_size, image_size)).numel()
-        self.head = nn.Linear(conv_out_features, 1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.head(self.conv(x).flatten(1)).squeeze(-1)  # logits
 
 
 class _ClassifierMetrics(NamedTuple):
@@ -74,83 +32,22 @@ class _ClassifierMetrics(NamedTuple):
     false_negative_rate: float  # 本物を偽物と誤判定した割合
 
 
-def _render_curves_to_array(curves: list[tuple[complex, complex, complex]]) -> np.ndarray:
-    scale = CANVAS_SIZE / VIEWBOX_SIZE
-    img = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
-    draw = ImageDraw.Draw(img)
-    r = LINE_WIDTH / 2
-    for start, control, end in curves:
-        poly = bezier_polyline(start, control, end, SEGMENTS_PER_CURVE) * scale
-        points = [tuple(p) for p in poly]
-        draw.line(points, fill=255, width=LINE_WIDTH, joint="curve")
-        # PILのdraw.lineは端点が四角く切れるため、筆で書いたような自然な丸みを出すために円を足す
-        for p in (points[0], points[-1]):
-            draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=255)
-    if BLUR_RADIUS > 0:
-        img = img.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
-    return np.asarray(img, dtype=np.float32) / 255.0
-
-
-def _render_batch(start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray) -> torch.Tensor:
-    images = np.stack(
-        [
-            _render_curves_to_array(
-                stroke_curves(start_points[i], end_points[i], offsets[i], existence[i].astype(bool))
-            )
-            for i in range(len(start_points))
-        ]
-    )
-    return torch.tensor(images, dtype=torch.float32).unsqueeze(1)  # (N, 1, H, W)
-
-
-def _sample_candidates(
-    checkpoint: Checkpoint, mu_real: torch.Tensor, count: int
-) -> tuple[RealScaleStrokes, np.ndarray, torch.Tensor]:
-    # 後段のフィルタで減る分を見込み、countより多めにサンプリングする。実測ではフィルタで除外される
-    # サンプルはごく僅か(数千件に1件程度)なため、係数・加算値自体は厳密なチューニング値ではなく
-    # 余裕を持たせた値
-    oversample = int(count * 1.2) + 50
-    z_raw = torch.randn(oversample, checkpoint.latent_dim, device=mu_real.device)
-    with torch.no_grad():
-        z = attract_to_latent_prior(z_raw, mu_real)
-        nearest_dist = torch.cdist(z, mu_real).min(dim=1).values
-        decoder_output = checkpoint.model.decode(z)
-    strokes = reconstructed_strokes_real(checkpoint, decoder_output)
-    existence_pred = existence_mask_from_logits(decoder_output.stroke_existence_logits)
-    return strokes, existence_pred, nearest_dist
-
-
-def _filter_to_count(
-    strokes: RealScaleStrokes, existence_pred: np.ndarray, nearest_dist: torch.Tensor, count: int
-) -> tuple[RealScaleStrokes, np.ndarray]:
-    # 実在字に極端に近いサンプルは、ラベルの矛盾(ほぼ同じ入力なのに本物・偽物の両方に現れる)を避けるため除外する
-    keep = (nearest_dist >= NEAREST_REAL_FILTER_THRESHOLD).cpu().numpy()
-    filtered_count = int(keep.sum())
-    print(f"Generated {len(nearest_dist)} samples, filtered out {len(nearest_dist) - filtered_count} near-duplicate(s)")
-    if filtered_count < count:
-        raise RuntimeError(f"Not enough fake examples after filtering: {filtered_count} < {count}")
-
-    idx = np.where(keep)[0][:count]
-    return RealScaleStrokes(strokes.start[idx], strokes.end[idx], strokes.offsets[idx]), existence_pred[idx]
-
-
 def _build_labeled_dataset(
     checkpoint: Checkpoint, mu_real: torch.Tensor, batch: Batch, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
     true_strokes = true_strokes_real(checkpoint, batch)
     true_existence = batch.stroke_existence.cpu().numpy().astype(bool)
-    real_x = _render_batch(true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence)
+    fake_strokes, fake_existence = sample_fake_strokes(checkpoint, mu_real, true_strokes, true_existence)
 
-    strokes, existence_pred, nearest_dist = _sample_candidates(checkpoint, mu_real, len(real_x))
-    fake_strokes, fake_existence = _filter_to_count(strokes, existence_pred, nearest_dist, len(real_x))
-    fake_x = _render_batch(fake_strokes.start, fake_strokes.end, fake_strokes.offsets, fake_existence)
+    real_x = render_batch(true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence)
+    fake_x = render_batch(fake_strokes.start, fake_strokes.end, fake_strokes.offsets, fake_existence)
 
     x = torch.cat([real_x, fake_x]).to(device)
     y = torch.cat([torch.ones(len(real_x)), torch.zeros(len(fake_x))]).to(device)  # ラベルは本物=1、偽物=0
     return x, y
 
 
-def _run_epoch(loader: DataLoader, model: _ImageClassifier, optimizer: torch.optim.Optimizer | None) -> float:
+def _run_epoch(loader: DataLoader, model: ImageClassifier, optimizer: torch.optim.Optimizer | None) -> float:
     is_training = optimizer is not None
     model.train(is_training)
     total_loss = 0.0
@@ -167,8 +64,8 @@ def _run_epoch(loader: DataLoader, model: _ImageClassifier, optimizer: torch.opt
 
 def _setup_training(
     train_x: torch.Tensor, train_y: torch.Tensor, test_x: torch.Tensor, test_y: torch.Tensor
-) -> tuple[_ImageClassifier, torch.optim.Optimizer, DataLoader, DataLoader]:
-    model = _ImageClassifier(CANVAS_SIZE, HIDDEN_CHANNELS).to(train_x.device)
+) -> tuple[ImageClassifier, torch.optim.Optimizer, DataLoader, DataLoader]:
+    model = ImageClassifier(CANVAS_SIZE, HIDDEN_CHANNELS).to(train_x.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     train_loader = DataLoader(
         TensorDataset(train_x, train_y), batch_size=BATCH_SIZE, shuffle=True, generator=torch.Generator().manual_seed(SEED)
@@ -177,7 +74,7 @@ def _setup_training(
     return model, optimizer, train_loader, test_loader
 
 
-def _train_classifier(train_x: torch.Tensor, train_y: torch.Tensor, test_x: torch.Tensor, test_y: torch.Tensor) -> _ImageClassifier:
+def _train_classifier(train_x: torch.Tensor, train_y: torch.Tensor, test_x: torch.Tensor, test_y: torch.Tensor) -> ImageClassifier:
     model, optimizer, train_loader, test_loader = _setup_training(train_x, train_y, test_x, test_y)
 
     best_test_loss = float("inf")
@@ -205,7 +102,7 @@ def _train_classifier(train_x: torch.Tensor, train_y: torch.Tensor, test_x: torc
     return model
 
 
-def _compute_metrics(model: _ImageClassifier, x: torch.Tensor, y: torch.Tensor) -> _ClassifierMetrics:
+def _compute_metrics(model: ImageClassifier, x: torch.Tensor, y: torch.Tensor) -> _ClassifierMetrics:
     model.eval()
     with torch.no_grad():
         probs = torch.sigmoid(model(x))
@@ -227,25 +124,6 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--save-model", type=Path, default=None, help="Path to save the trained classifier to")
     return parser.parse_args()
-
-
-def load_classifier(path: Path, device: torch.device) -> _ImageClassifier:
-    saved = torch.load(path, map_location=device)
-    model = _ImageClassifier(saved["image_size"], saved["hidden_channels"]).to(device)
-    model.load_state_dict(saved["model_state_dict"])
-    model.eval()
-    return model
-
-
-def save_classifier(model: _ImageClassifier, path: Path) -> None:
-    # テストサンプルごとの分類確率を使った事後分析(既知指標・単純な交絡との相関など)を、学習のたびの
-    # 初期化・ミニバッチ順序のランダム性に左右されず繰り返し行えるようにするため、学習済みモデルを
-    # 保存する。CANVAS_SIZE・HIDDEN_CHANNELSは現状モジュール定数で固定だが、将来変更されても
-    # 保存済みモデルの構造を復元できるよう、値ごと保存しておく
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {"model_state_dict": model.state_dict(), "image_size": CANVAS_SIZE, "hidden_channels": HIDDEN_CHANNELS}, path
-    )
 
 
 def main() -> None:

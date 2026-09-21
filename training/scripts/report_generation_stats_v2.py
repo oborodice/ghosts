@@ -105,7 +105,7 @@ def _triple_junction_count(
     return sum(1 for strokes in clusters.values() if len(strokes) >= 3)
 
 
-def _crossings_and_triple_junctions(
+def crossings_and_triple_junctions(
     start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # 線分交差探索(最も重い部分、ストロークペア×12線分×12線分の判定)だけベクトル化して求め、
@@ -186,7 +186,7 @@ def _report(
     existence: np.ndarray,
     angle_gmm: AngleGMM,
 ) -> None:
-    crossings, diag, triple = _crossings_and_triple_junctions(start_points, end_points, offsets, existence)
+    crossings, diag, triple = crossings_and_triple_junctions(start_points, end_points, offsets, existence)
     print(f"--- {label} (n={len(start_points)}) ---")
     print(f"isolated_stroke_rate = {_isolated_stroke_rate(start_points, end_points, existence):.2f}%")
     print(f"crossings mean = {crossings.mean():.3f} (diagonal-involved = {diag.mean():.3f})")

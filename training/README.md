@@ -87,6 +87,12 @@ $ uv run scripts/visualize_pointer_morph_v2.py
 # `--save-model`で学習済み分類器の保存先を指定できる(省略時は保存しない)
 $ uv run scripts/evaluate_generation_realism_visual_v2.py
 
+# evaluate_generation_realism_visual_v2.pyで`--save-model`保存した分類器が、実データ/生成結果を
+# 何を根拠に見分けているかを分析する。テストサンプルごとの分類確率と、triple_junctions・ストローク長・
+# offsetのサンプル内ばらつきといった既知指標、ストローク数・総ストローク長といった単純な交絡との
+# 相関(ピアソン相関係数)を計算する
+$ uv run scripts/analyze_classifier_scores_v2.py --classifier <path>
+
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する。
 # 接続点周辺は文字全体の表示では崩れが見えづらいため、個別にズームインした図も表示する
 $ uv run scripts/visualize_reconstruction.py
