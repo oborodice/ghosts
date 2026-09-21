@@ -50,9 +50,10 @@ def _known_indicators(
 
     length_mean, _, _ = masked_mean_std(torch.from_numpy(length).float(), existence_t)
     offset_mean, offset_std, _ = masked_mean_std(torch.from_numpy(offset_magnitude).float(), existence_t)
-    _, _, triple = crossings_and_triple_junctions(start_points, end_points, offsets, existence)
+    crossings, _, triple = crossings_and_triple_junctions(start_points, end_points, offsets, existence)
 
     return {
+        "crossings": crossings,
         "triple_junctions": triple,
         "stroke_length_mean": length_mean.numpy(),
         "offset_mean_within_sample": offset_mean.numpy(),
