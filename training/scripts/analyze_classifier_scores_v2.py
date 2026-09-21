@@ -2,13 +2,17 @@
 # 学習済みの画像ベース分類器(evaluate_generation_realism_visual_v2.pyで学習・保存したもの)が、
 # 実データと生成データをどのような根拠で見分けているかを分析する。テストサンプルごとの分類確率と、
 # (a) triple_junctions・ストローク長・offsetのサンプル内ばらつきといった既知指標、(b) ストローク数・
-# 総ストローク長といった単純な交絡、との相関(ピアソン相関係数)を計算する
+# 総ストローク長といった単純な交絡、との相関(ピアソン相関係数)を計算する。ペアワイズ相関は指標を
+# 1つずつ見た関係しか測れないため、既知指標・交絡を組み合わせたロジスティック回帰のAUCも計算し、
+# 「指標の組み合わせでどこまで画像分類器のAUCの高さを説明できるか」を直接比較できるようにする
 import argparse
 from pathlib import Path
 
 import numpy as np
 import torch
 from scipy.stats import pearsonr
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 
 from report_generation_stats_v2 import crossings_and_triple_junctions
 from vae_checkpoint_v2 import load_checkpoint
@@ -62,6 +66,16 @@ def _confounds(start_points: np.ndarray, end_points: np.ndarray, existence: np.n
     }
 
 
+def _logistic_regression_auc(labels: np.ndarray, *indicator_dicts: dict[str, np.ndarray]) -> float:
+    # ペアワイズ相関と異なり、指標を組み合わせて1つのスコアにしたときの分離性能(AUC)を測る。
+    # 特徴量5個・サンプル数千件規模の単純な凸最適化のため過学習のリスクは小さく、画像分類器の
+    # AUCと同じval集合上でfit・評価してよいと判断し、train/testを分けていない
+    features = np.column_stack([values for indicators in indicator_dicts for values in indicators.values()])
+    model = LogisticRegression().fit(features, labels)
+    predicted = model.predict_proba(features)[:, 1]
+    return roc_auc_score(labels, predicted)
+
+
 def main() -> None:
     args = _parse_args()
     device = select_device()
@@ -108,6 +122,20 @@ def main() -> None:
     for name, values in confounds.items():
         r, p = pearsonr(probs, values)
         print(f"{name}: r={r:.4f} (p={p:.2e})")
+    print()
+
+    # _combineがreal→fakeの順で連結しているため、ラベルも同じ順で揃える
+    labels = np.concatenate([np.ones(len(true_strokes.start)), np.zeros(len(fake_strokes.start))])
+    print("=== AUC comparison ===")
+    print(f"image classifier: auc={roc_auc_score(labels, probs):.5f}")
+    print(
+        "logistic regression (known indicators only): "
+        f"auc={_logistic_regression_auc(labels, known_indicators):.5f}"
+    )
+    print(
+        "logistic regression (known indicators + confounds): "
+        f"auc={_logistic_regression_auc(labels, known_indicators, confounds):.5f}"
+    )
 
 
 if __name__ == "__main__":
