@@ -3,6 +3,9 @@
 # 生成結果の測定値と比較できる方法で数値化する診断ツール。VAEの学習・推論(生成)には
 # 一切組み込まれない、独立した事後診断用のスクリプト。あわせて、重複スロットが3本以上合流の
 # カウントを狂わせていないか、およびポインタの構造的な破綻(自己ループ・幽霊参照)の頻度も確認する
+import argparse
+from pathlib import Path
+
 import numpy as np
 import torch
 
@@ -27,7 +30,7 @@ from vae_eval_common_v2 import (
 )
 from vae_losses import AngleGMM, angle_log_density, build_angle_gmm
 from vae_losses_v2 import MIN_DIRECTION_NORM
-from vae_model_v2 import select_device
+from vae_model_v2 import CHECKPOINT_PATH, select_device
 from vae_synthetic_losses import masked_mean_std
 
 SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値(歴史的な比較のため)
@@ -280,9 +283,16 @@ def _print_duplicate_slot_check(
     print(f"fraction within clustering radius (= not missed by triple-junction counting): {within_radius:.1f}%")
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT_PATH, help="Path to the VAE checkpoint to evaluate")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     device = select_device()
-    checkpoint = load_checkpoint(device)
+    checkpoint = load_checkpoint(device, checkpoint_path=args.checkpoint)
     datasets = prepare_datasets()
     angle_gmm = build_angle_gmm(datasets.angle_gmm_params, device)
     train_batch = load_batch(datasets, "train", device)
