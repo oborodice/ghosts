@@ -257,6 +257,17 @@ def _initialize_run(
     return _RunInit(state, 1, float("inf"), 0)
 
 
+def _format_loss_breakdown(*components: LossComponents | SyntheticLossComponents) -> str:
+    # 各componentsの_fieldsを列挙して組み立てる(totalは呼び出し元で別途表示済みのため除く)。
+    # 損失を追加・削除してもここを手で編集する必要がない
+    return " ".join(
+        f"{name}={getattr(component, name):.4f}"
+        for component in components
+        for name in component._fields
+        if name != "total"
+    )
+
+
 def train(
     datasets: Datasets,
     device: torch.device,
@@ -303,11 +314,7 @@ def train(
         val_total = val_losses.total + val_synthetic.total
         print(
             f"Epoch {epoch}: train_loss={train_total:.4f} val_loss={val_total:.4f} beta={beta_epoch:.4f} | "
-            f"train breakdown: vertex={train_losses.vertex_loss:.4f} kl={train_losses.kl_divergence:.4f} "
-            f"crossing={train_losses.crossing_loss:.4f} angle={train_losses.angle_naturalness_loss:.4f} "
-            f"min_length={train_losses.min_length_loss:.4f} repulsion={train_losses.vertex_repulsion_loss:.4f} "
-            f"self_loop={train_synthetic.self_loop_loss:.4f} synthetic_crossing={train_synthetic.crossing_loss:.4f} "
-            f"start_pointer={train_losses.start_pointer_loss:.4f} end_pointer={train_losses.end_pointer_loss:.4f}"
+            f"train breakdown: {_format_loss_breakdown(train_losses, train_synthetic)}"
         )
 
         if val_total < best_val_loss:

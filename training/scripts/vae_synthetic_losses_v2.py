@@ -18,7 +18,7 @@ class SyntheticLossComponents(NamedTuple):
     # 同じ設計)
     total: torch.Tensor
     self_loop_loss: torch.Tensor
-    crossing_loss: torch.Tensor
+    synthetic_crossing_loss: torch.Tensor
 
 
 SELF_LOOP_LOSS_WEIGHT = 1.0  # 1本のストロークの始点・終点ポインタが同じ頂点を指してしまう自己ループ
@@ -136,7 +136,7 @@ def compute_synthetic_loss(
     # 異なるため、decodeを共有せずそれぞれ独立に合成zを構築・decodeする
     losses: dict[str, torch.Tensor] = {}
     losses["self_loop_loss"] = _compute_self_loop_loss(model, mu, mu_pool)
-    losses["crossing_loss"] = _compute_synthetic_crossing_loss(
+    losses["synthetic_crossing_loss"] = _compute_synthetic_crossing_loss(
         model, mu, mu_pool, vertex_std, stroke_offset_mean, stroke_offset_std,
         target_crossings_mean, target_crossings_std,
     )
@@ -144,7 +144,7 @@ def compute_synthetic_loss(
     # ここに列挙のない損失は暗黙的に重み1.0として扱う
     weights = {
         "self_loop_loss": SELF_LOOP_LOSS_WEIGHT,
-        "crossing_loss": SYNTHETIC_CROSSING_WEIGHT,
+        "synthetic_crossing_loss": SYNTHETIC_CROSSING_WEIGHT,
     }
     total = sum(weights.get(name, 1.0) * value for name, value in losses.items())
     return SyntheticLossComponents(total=total, **losses)
