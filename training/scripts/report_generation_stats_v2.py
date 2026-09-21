@@ -37,12 +37,18 @@ SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値
 SEED = 0
 
 
-def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray) -> float:
+def isolated_stroke_counts(
+    start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     # 端点間の実スケール距離のみで孤立を判定する(曲線同士の交差は考慮しない)。
-    # 過去の実データ・生成結果の測定値と比較できるよう、この定義(距離ベース、交差非考慮)を維持する
+    # 過去の実データ・生成結果の測定値と比較できるよう、この定義(距離ベース、交差非考慮)を維持する。
+    # サンプル(1字)ごとの(孤立ストローク数, 総ストローク数)を返す。母集団全体の割合(_isolated_stroke_rate)・
+    # サンプルごとの割合(analyze_classifier_scores_v2.pyの既知指標)の両方をこの2つの値から計算できる
     endpoints = np.stack([start_points, end_points], axis=2)  # (N, stroke_count, 2[始点/終点], 2[x, y])
-    total_isolated = total_strokes = 0
-    for i in range(len(start_points)):
+    n = len(start_points)
+    isolated_count = np.zeros(n)
+    total_count = np.zeros(n)
+    for i in range(n):
         active = np.where(existence[i])[0]
         if len(active) == 0:
             continue
@@ -53,9 +59,15 @@ def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, exis
             dist[2 * k + 1, 2 * k] = np.inf
         np.fill_diagonal(dist, np.inf)
         has_conn = (dist.reshape(len(active), 2, len(active) * 2) < CONNECTION_THRESHOLD).any(axis=(1, 2))
-        total_isolated += int((~has_conn).sum())
-        total_strokes += len(active)
-    return 100 * total_isolated / total_strokes if total_strokes else float("nan")
+        isolated_count[i] = int((~has_conn).sum())
+        total_count[i] = len(active)
+    return isolated_count, total_count
+
+
+def _isolated_stroke_rate(start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray) -> float:
+    isolated_count, total_count = isolated_stroke_counts(start_points, end_points, existence)
+    total = total_count.sum()
+    return 100 * isolated_count.sum() / total if total else float("nan")
 
 
 def _triple_junction_count(
@@ -147,19 +159,31 @@ def crossings_and_triple_junctions(
     return total, diag, triple
 
 
-def _angle_naturalness_log_density(
+def angle_naturalness_log_density_sums(
     start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray, angle_gmm: AngleGMM
-) -> float:
+) -> tuple[np.ndarray, np.ndarray]:
     # 正解データが無い生成経路でも比較できるよう、正解との相対評価ではなく、GMMの対数密度をそのまま
     # 使う絶対評価にする(値が大きいほど自然)。退化した(始点・終点がほぼ同じ)ストロークは、
-    # 方向ベクトルのノルムがMIN_DIRECTION_NORM未満のものとして除外する
+    # 方向ベクトルのノルムがMIN_DIRECTION_NORM未満のものとして除外する。
+    # サンプル(1字)ごとの(対数密度の合計, 有効ストローク数)を返す。マスクする前に(N, stroke_count)
+    # 全体で対数密度を計算してから合計側でマスクするため、マスク後にまとめて平均する場合(母集団全体、
+    # _angle_naturalness_log_density)と全く同じ値になる
     direction = end_points - start_points
     well_defined = np.linalg.norm(direction, axis=-1) >= MIN_DIRECTION_NORM
     mask = existence.astype(bool) & well_defined
     angle = np.arctan2(direction[..., 1], direction[..., 0])
-    angle_tensor = torch.from_numpy(angle[mask]).float().to(angle_gmm.means.device)
-    log_density = angle_log_density(angle_tensor, angle_gmm)
-    return log_density.mean().item()
+    angle_tensor = torch.from_numpy(angle).float().to(angle_gmm.means.device)
+    log_density = angle_log_density(angle_tensor, angle_gmm).cpu().numpy()
+    mask_f = mask.astype(np.float64)
+    return (log_density * mask_f).sum(axis=1), mask_f.sum(axis=1)
+
+
+def _angle_naturalness_log_density(
+    start_points: np.ndarray, end_points: np.ndarray, existence: np.ndarray, angle_gmm: AngleGMM
+) -> float:
+    sums, counts = angle_naturalness_log_density_sums(start_points, end_points, existence, angle_gmm)
+    total_count = counts.sum()
+    return sums.sum() / total_count if total_count else float("nan")
 
 
 def _offset_std(offsets: np.ndarray, existence: np.ndarray) -> float:

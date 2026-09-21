@@ -15,14 +15,25 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
-from report_generation_stats_v2 import crossings_and_triple_junctions
+from report_generation_stats_v2 import (
+    angle_naturalness_log_density_sums,
+    crossings_and_triple_junctions,
+    isolated_stroke_counts,
+)
 from vae_checkpoint_v2 import load_checkpoint
 from vae_classifier_dataset_v2 import render_batch, sample_fake_strokes
 from vae_classifier_model_v2 import load_classifier
 from vae_data_v2 import prepare_datasets
 from vae_eval_common_v2 import encode_batch, load_batch, true_strokes_real
+from vae_losses import AngleGMM, build_angle_gmm
 from vae_model_v2 import CHECKPOINT_PATH, select_device
 from vae_synthetic_losses import masked_mean_std
+
+
+def _safe_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    # 対象ストロークが無いサンプル(denominator=0)は0を返す
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(denominator > 0, numerator / denominator, 0.0)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -38,12 +49,14 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _known_indicators(
-    start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray
+    start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray, angle_gmm: AngleGMM
 ) -> dict[str, np.ndarray]:
     # 各指標をサンプル(1字)単位で計算する。triple_junctionsはもともとサンプルごとのカウントだが、
     # offset・ストローク長は通常、複数サンプルにまたがる集団の標準偏差・平均として測る指標であり、
     # ここではサンプルごとの分類確率と相関を取るため、いずれも「そのサンプル自身のストローク間での
-    # 平均・ばらつき」に読み替える
+    # 平均・ばらつき」に読み替える。isolated_stroke_rate・angle_naturalnessも同様に、
+    # report_generation_stats_v2.pyが返すサンプルごとの(合計, 件数)から、そのサンプル自身の
+    # 割合・平均に変換する(0件で割るのを避けるため、対象ストロークが無いサンプルは0とする)
     length = np.linalg.norm(end_points - start_points, axis=-1)
     offset_magnitude = np.linalg.norm(offsets, axis=-1)
     existence_t = torch.from_numpy(existence.astype("float32"))
@@ -51,6 +64,10 @@ def _known_indicators(
     length_mean, _, _ = masked_mean_std(torch.from_numpy(length).float(), existence_t)
     offset_mean, offset_std, _ = masked_mean_std(torch.from_numpy(offset_magnitude).float(), existence_t)
     crossings, _, triple = crossings_and_triple_junctions(start_points, end_points, offsets, existence)
+    isolated_count, stroke_count = isolated_stroke_counts(start_points, end_points, existence)
+    angle_sum, angle_count = angle_naturalness_log_density_sums(start_points, end_points, existence, angle_gmm)
+    isolated_stroke_rate = 100 * _safe_ratio(isolated_count, stroke_count)
+    angle_naturalness = _safe_ratio(angle_sum, angle_count)
 
     return {
         "crossings": crossings,
@@ -58,6 +75,8 @@ def _known_indicators(
         "stroke_length_mean": length_mean.numpy(),
         "offset_mean_within_sample": offset_mean.numpy(),
         "offset_std_within_sample": offset_std.numpy(),
+        "isolated_stroke_rate": isolated_stroke_rate,
+        "angle_naturalness": angle_naturalness,
     }
 
 
@@ -100,6 +119,7 @@ def main() -> None:
     checkpoint = load_checkpoint(device, checkpoint_path=args.checkpoint)
     classifier = load_classifier(args.classifier, device)
     datasets = prepare_datasets()
+    angle_gmm = build_angle_gmm(datasets.angle_gmm_params, device)
     train_batch = load_batch(datasets, "train", device)
     val_batch = load_batch(datasets, "val", device)
 
@@ -121,8 +141,8 @@ def main() -> None:
         return {name: np.concatenate([real[name], fake[name]]) for name in real}
 
     known_indicators = _combine(
-        _known_indicators(true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence),
-        _known_indicators(fake_strokes.start, fake_strokes.end, fake_strokes.offsets, fake_existence),
+        _known_indicators(true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence, angle_gmm),
+        _known_indicators(fake_strokes.start, fake_strokes.end, fake_strokes.offsets, fake_existence, angle_gmm),
     )
     confounds = _combine(
         _confounds(true_strokes.start, true_strokes.end, true_existence),
