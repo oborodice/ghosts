@@ -58,7 +58,7 @@ echo "port=${POD_PORT}"
 # 作り直すか、在庫の多い別のデータセンターを試す(Network Volumeはデータセンター固定のため、切り替える
 # 場合は新しいVolumeの作成が必要)
 ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
-  "nproc; lscpu | grep -i 'model name'; python3 -c 'import time; s = time.time(); x = 0
+  "nproc; lscpu | grep -iE 'model name|mhz'; python3 -c 'import time; s = time.time(); x = 0
 for i in range(20_000_000):
     x += i
 print(f\"single-thread loop: {time.time() - s:.2f}s\")'"
