@@ -13,6 +13,7 @@ import torch
 from scipy.stats import pearsonr
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
 
 from report_generation_stats_v2 import crossings_and_triple_junctions
 from vae_checkpoint_v2 import load_checkpoint
@@ -40,20 +41,21 @@ def _known_indicators(
     start_points: np.ndarray, end_points: np.ndarray, offsets: np.ndarray, existence: np.ndarray
 ) -> dict[str, np.ndarray]:
     # 各指標をサンプル(1字)単位で計算する。triple_junctionsはもともとサンプルごとのカウントだが、
-    # offsetのばらつき・ストローク長は通常、複数サンプルにまたがる集団の標準偏差・平均として測る
-    # 指標であり、ここではサンプルごとの分類確率と相関を取るため、offset_stdは「そのサンプル自身の
-    # ストローク間でのばらつき」、stroke_lengthは「そのサンプル自身のストロークの平均長」に読み替える
+    # offset・ストローク長は通常、複数サンプルにまたがる集団の標準偏差・平均として測る指標であり、
+    # ここではサンプルごとの分類確率と相関を取るため、いずれも「そのサンプル自身のストローク間での
+    # 平均・ばらつき」に読み替える
     length = np.linalg.norm(end_points - start_points, axis=-1)
     offset_magnitude = np.linalg.norm(offsets, axis=-1)
     existence_t = torch.from_numpy(existence.astype("float32"))
 
     length_mean, _, _ = masked_mean_std(torch.from_numpy(length).float(), existence_t)
-    _, offset_std, _ = masked_mean_std(torch.from_numpy(offset_magnitude).float(), existence_t)
+    offset_mean, offset_std, _ = masked_mean_std(torch.from_numpy(offset_magnitude).float(), existence_t)
     _, _, triple = crossings_and_triple_junctions(start_points, end_points, offsets, existence)
 
     return {
         "triple_junctions": triple,
         "stroke_length_mean": length_mean.numpy(),
+        "offset_mean_within_sample": offset_mean.numpy(),
         "offset_std_within_sample": offset_std.numpy(),
     }
 
@@ -69,8 +71,10 @@ def _confounds(start_points: np.ndarray, end_points: np.ndarray, existence: np.n
 def _logistic_regression_auc(labels: np.ndarray, *indicator_dicts: dict[str, np.ndarray]) -> float:
     # ペアワイズ相関と異なり、指標を組み合わせて1つのスコアにしたときの分離性能(AUC)を測る。
     # 特徴量5個・サンプル数千件規模の単純な凸最適化のため過学習のリスクは小さく、画像分類器の
-    # AUCと同じval集合上でfit・評価してよいと判断し、train/testを分けていない
+    # AUCと同じval集合上でfit・評価してよいと判断し、train/testを分けていない。指標間でスケールが
+    # 大きく異なる(件数系は数個、総ストローク長は数百)ため、標準化しないとlbfgsが収束しないことがある
     features = np.column_stack([values for indicators in indicator_dicts for values in indicators.values()])
+    features = StandardScaler().fit_transform(features)
     model = LogisticRegression().fit(features, labels)
     predicted = model.predict_proba(features)[:, 1]
     return roc_auc_score(labels, predicted)
