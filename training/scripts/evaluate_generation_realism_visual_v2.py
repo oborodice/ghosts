@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # 画像ベースの診断分類器。生の数値特徴量ではなく、実際にレンダリングした画像を入力にして
 # 本物/偽物を判別する。VAEの学習・推論には一切組み込まれない、独立した事後診断用のスクリプト
+import argparse
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
@@ -24,7 +26,7 @@ from vae_eval_common_v2 import (
     stroke_curves,
     true_strokes_real,
 )
-from vae_model_v2 import select_device
+from vae_model_v2 import CHECKPOINT_PATH, select_device
 
 NEAREST_REAL_FILTER_THRESHOLD = 1.0  # これより実在字に近い生成サンプルは、ラベルの矛盾(ほぼ同じ入力なのに本物・偽物の両方に現れる)を避けるため除外する
 VIEWBOX_SIZE = 109.0  # KanjiVGのSVGのviewBoxサイズ(データの座標系そのもの。training/data/kanjivg/*.svg参照)
@@ -218,10 +220,39 @@ def _compute_metrics(model: _ImageClassifier, x: torch.Tensor, y: torch.Tensor) 
     )
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--checkpoint", type=Path, default=CHECKPOINT_PATH, help="Path to the VAE checkpoint to evaluate"
+    )
+    parser.add_argument("--save-model", type=Path, default=None, help="Path to save the trained classifier to")
+    return parser.parse_args()
+
+
+def load_classifier(path: Path, device: torch.device) -> _ImageClassifier:
+    saved = torch.load(path, map_location=device)
+    model = _ImageClassifier(saved["image_size"], saved["hidden_channels"]).to(device)
+    model.load_state_dict(saved["model_state_dict"])
+    model.eval()
+    return model
+
+
+def save_classifier(model: _ImageClassifier, path: Path) -> None:
+    # テストサンプルごとの分類確率を使った事後分析(既知指標・単純な交絡との相関など)を、学習のたびの
+    # 初期化・ミニバッチ順序のランダム性に左右されず繰り返し行えるようにするため、学習済みモデルを
+    # 保存する。CANVAS_SIZE・HIDDEN_CHANNELSは現状モジュール定数で固定だが、将来変更されても
+    # 保存済みモデルの構造を復元できるよう、値ごと保存しておく
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {"model_state_dict": model.state_dict(), "image_size": CANVAS_SIZE, "hidden_channels": HIDDEN_CHANNELS}, path
+    )
+
+
 def main() -> None:
+    args = _parse_args()
     torch.manual_seed(SEED)
     device = select_device()
-    checkpoint = load_checkpoint(device)
+    checkpoint = load_checkpoint(device, checkpoint_path=args.checkpoint)
     datasets = prepare_datasets()
     train_batch = load_batch(datasets, "train", device)
     val_batch = load_batch(datasets, "val", device)
@@ -246,6 +277,10 @@ def main() -> None:
         f"accuracy={metrics.accuracy:.4f} auc={metrics.auc:.5f} "
         f"false_positive_rate={metrics.false_positive_rate:.4f} false_negative_rate={metrics.false_negative_rate:.4f}"
     )
+
+    if args.save_model:
+        save_classifier(model, args.save_model)
+        print(f"Saved classifier to {args.save_model}")
 
 
 if __name__ == "__main__":

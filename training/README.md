@@ -83,7 +83,8 @@ $ uv run scripts/visualize_pointer_morph_v2.py
 
 # 本物/偽物を、数値特徴量ではなく実際にレンダリングした画像で判別する診断分類器。頂点+ストローク構造
 # (vae_v2.pt)の生成結果に対して使う。数値特徴量では見えている差異が、人間の視覚に近い形
-# (低解像度・軽いぼかし)でも見分けられるかを確認する
+# (低解像度・軽いぼかし)でも見分けられるかを確認する。`--checkpoint`で評価対象のVAEチェックポイントを、
+# `--save-model`で学習済み分類器の保存先を指定できる(省略時は保存しない)
 $ uv run scripts/evaluate_generation_realism_visual_v2.py
 
 # validationサンプルの元データと再構成結果(model.decode(mu))を並べて目視確認する。
