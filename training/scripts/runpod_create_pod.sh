@@ -5,15 +5,20 @@ set -euo pipefail
 # 自動で引く(利用者にデータセンターIDを別途調べさせない)
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 TEMPLATE_ID="runpod-torch-v280"
-GPU_ID="NVIDIA GeForce RTX 4090"
+DEFAULT_GPU_ID="NVIDIA GeForce RTX 4090"
 
 if [ "$#" -lt 1 ]; then
-  echo "Usage: $0 <network-volume-id> [pod-name]" >&2
+  echo "Usage: $0 <network-volume-id> [pod-name] [gpu-id]" >&2
+  echo "  gpu-id: defaults to '${DEFAULT_GPU_ID}'. Override when that GPU has no stock in the volume's" >&2
+  echo "  datacenter (e.g. \"NVIDIA GeForce RTX 5090\", \"NVIDIA GeForce RTX 3090\"); see 'runpodctl datacenter list'" >&2
+  echo "  for what's available where. This workload is CPU-bound (see the benchmark below), so GPU choice" >&2
+  echo "  mostly doesn't affect epoch time." >&2
   exit 1
 fi
 
 VOLUME_ID="$1"
 POD_NAME="${2:-ghosts-$(date +%Y%m%d%H%M%S)}"
+GPU_ID="${3:-${DEFAULT_GPU_ID}}"
 
 DATA_CENTER_ID="$(runpodctl network-volume list | jq -r --arg id "${VOLUME_ID}" '.[] | select(.id == $id) | .dataCenterId')"
 if [ -z "${DATA_CENTER_ID}" ]; then

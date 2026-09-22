@@ -129,8 +129,10 @@ $ uv run scripts/export_onnx.py
 
 ```sh
 # pod作成(Network Volume ID指定)。SSH接続確認・マウント確認まで行い、pod_id/ip/portを表示する。
-# GPU機種が同じでもCPU側の当たり外れがあるため、シングルスレッドの簡易ベンチマークも実行する
-$ ./scripts/runpod_create_pod.sh <network-volume-id> [pod-name]
+# GPU機種が同じでもCPU側の当たり外れがあるため、シングルスレッドの簡易ベンチマークも実行する。
+# gpu-idは省略時RTX 4090。在庫切れの場合は別機種を指定する(このワークロードはCPUがボトルネックの
+# ため、機種を変えてもエポック時間はほぼ変わらない)
+$ ./scripts/runpod_create_pod.sh <network-volume-id> [pod-name] [gpu-id]
 
 # コード(scripts・pyproject.toml・uv.lock)を転送しuv syncする。初回のみ--with-dataでデータも送る。
 # アブレーション等で本番のtraining/scripts以外(スクラッチコピー)を送りたい場合は--sourceで指定する
