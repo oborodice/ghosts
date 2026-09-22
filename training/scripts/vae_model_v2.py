@@ -12,13 +12,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# 未チューニングで据え置いている値。有効性は他の損失重み(頂点反発損失等)との組み合わせで変わりうる
-# ことを実測で確認済みのため、正式な値は他の重みと合わせたsweepで決める。なお、保存済みチェックポイントは
+# 容量・repulsion・βの組み合わせsweepで、他の7候補を上回った値。ただしbandwidth
+# (vae_eval_common_v2.KERNEL_BANDWIDTH)はこのsweep全体でLATENT_DIM=48向けに較正した値を一律流用
+# したままで、96次元向けに個別較正すればさらに良くなる可能性は未検証。なお、保存済みチェックポイントは
 # 学習時点のhidden_dims/latent_dim/slot_attention_configを保持しており、このファイルの現在値には追従しない
-HIDDEN_DIMS: tuple[int, int] = (1024, 512)
-LATENT_DIM = 48
+HIDDEN_DIMS: tuple[int, int] = (2048, 1024)
+LATENT_DIM = 96
 
-SLOT_DIM = 256
+SLOT_DIM = 512
 SLOT_ATTENTION_HEADS = 4
 SLOT_ATTENTION_LAYERS = 2
 SLOT_ATTENTION_FFN_DIM = 512

@@ -28,8 +28,9 @@ SLOT_ATTENTION_CONFIG = SlotAttentionConfig(
     SLOT_DIM, SLOT_ATTENTION_HEADS, SLOT_ATTENTION_LAYERS, SLOT_ATTENTION_FFN_DIM
 )
 
-BETA = 0.25  # posterior collapse(潜在次元の大部分が死んで再構成精度が落ちる現象)を避けるため、
-# 複数候補を比較して選んだ暫定値(正式な最適値探しは今後別途行う)
+BETA = 0.1  # posterior collapse(潜在次元の大部分が死んで再構成精度が落ちる現象)を避けるため、
+# 複数候補を比較して選んだ暫定値。容量・repulsion・βの組み合わせsweepで、この値がrepulsionの
+# 高い方の水準と組み合わさったときに他の7候補を上回ることを確認済み(正式な最適値探しは今後別途行う)
 KL_ANNEALING_EPOCHS = 60  # このepoch数をかけてβを0からBETAまで線形に引き上げる(warm-up)
 GUMBEL_TEMPERATURE = 1.0  # Straight-Through Gumbel-Softmaxの温度。標準的な既定値を暫定採用(正式な調整は今後別途行う)
 LEARNING_RATE = 2e-4  # パラメータ数が数倍に増えたモデルに対して、既存コードから引き継いだ1e-3のままでは
