@@ -61,9 +61,20 @@ echo "port=${POD_PORT}"
 # 走らせ、遅いホストに当たったかを早期に判定する。目安: このループが1秒未満なら当たり(実測0.91秒で
 # 26秒/エポック)、10秒を超えるようならハズレ(実測13.10秒で68秒/エポック)。ハズレの場合はterminateして
 # 作り直すか、在庫の多い別のデータセンターを試す(Network Volumeはデータセンター固定のため、切り替える
-# 場合は新しいVolumeの作成が必要)
+# 場合は新しいVolumeの作成が必要)。
+# nprocはコンテナから見えるホスト全体のコア数を返すだけで、実際にこのpodへ割り当てられたCPU予算
+# (cgroup制限)とは一致しない(実測: nproc=48/120のpodが、実際は/sys/fs/cgroup/cpu.maxベースで
+# 約13コアしかなかった)。1つのpodに複数構成を並列実行する(runpod_deploy_code.sh --remote-dir)際は
+# nprocではなくこちらの数値を並列数の目安にする
 ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
   "nproc; lscpu | grep -iE 'model name|mhz'; python3 -c 'import time; s = time.time(); x = 0
 for i in range(20_000_000):
     x += i
-print(f\"single-thread loop: {time.time() - s:.2f}s\")'"
+print(f\"single-thread loop: {time.time() - s:.2f}s\")'
+echo -n 'actual cgroup CPU budget: '
+if [ -f /sys/fs/cgroup/cpu.max ]; then
+  read -r quota period < /sys/fs/cgroup/cpu.max
+  if [ \"\${quota}\" = max ]; then echo unlimited; else python3 -c \"print(f'{\${quota}/\${period}:.1f} vCPU')\"; fi
+else
+  python3 -c \"q=open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us').read().strip(); p=open('/sys/fs/cgroup/cpu/cpu.cfs_period_us').read().strip(); print('unlimited' if int(q)<0 else f'{int(q)/int(p):.1f} vCPU')\"
+fi"
