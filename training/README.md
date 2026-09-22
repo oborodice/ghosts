@@ -135,18 +135,23 @@ $ uv run scripts/export_onnx.py
 $ ./scripts/runpod_create_pod.sh <network-volume-id> [pod-name] [gpu-id]
 
 # コード(scripts・pyproject.toml・uv.lock)を転送しuv syncする。初回のみ--with-dataでデータも送る。
-# アブレーション等で本番のtraining/scripts以外(スクラッチコピー)を送りたい場合は--sourceで指定する
-$ ./scripts/runpod_deploy_code.sh <ip> <port> [--with-data] [--source <local-dir>]
+# アブレーション等で本番のtraining/scripts以外(スクラッチコピー)を送りたい場合は--sourceで指定する。
+# このワークロードは1プロセスあたりCPU1コア・GPU数%しか使わないため、1つのpodに複数構成を
+# 同時に置いて並列実行する余地が大きい。--remote-dirで別々の配置先に分け、--link-venvで
+# 既に同期済みの.venvをシンボリックリンクすれば(依存関係が同じなら)再ダウンロードなしで済む
+$ ./scripts/runpod_deploy_code.sh <ip> <port> [--with-data] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]
 
-# 学習をnohup+disownでバックグラウンド起動する(中断からの再開はremote-resume-pathを指定)
-$ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path]
+# 学習をnohup+disownでバックグラウンド起動する(中断からの再開はremote-resume-pathを指定)。
+# --remote-dirは上と対応する配置先を指定する場合のみ
+$ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path] [--remote-dir <path>]
 
 # 学習プロセスが動いているか・train.logの直近n行を確認する(train.logはNetwork Volume単位で
 # 永続化されるため、プロセスが動いていないのに前回の内容が表示されることがある点に注意)
 $ ./scripts/runpod_check_progress.sh <ip> <port> [n-lines]
 
-# チェックポイント・train.logをダウンロードする(省略時は最新のチェックポイントを対象にする)
-$ ./scripts/runpod_download_results.sh <ip> <port> [remote-checkpoint-name|latest] [local-name]
+# チェックポイント・train.logをダウンロードする(省略時は最新のチェックポイントを対象にする)。
+# --remote-dirは上と対応する配置先を指定する場合のみ
+$ ./scripts/runpod_download_results.sh <ip> <port> [remote-checkpoint-name|latest] [local-name] [--remote-dir <path>]
 
 # podを削除して課金を止める(Network Volumeは残る)
 $ ./scripts/runpod_terminate.sh <pod-id>
