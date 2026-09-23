@@ -20,6 +20,7 @@ class SyntheticLossComponents(NamedTuple):
     self_loop_loss: torch.Tensor
     phantom_reference_loss: torch.Tensor
     synthetic_crossing_loss: torch.Tensor
+    long_chord_loss: torch.Tensor
 
 
 SELF_LOOP_LOSS_WEIGHT = 1.0  # 1本のストロークの始点・終点ポインタが同じ頂点を指してしまう自己ループ
@@ -29,6 +30,12 @@ PHANTOM_REFERENCE_LOSS_WEIGHT = 1.0  # ストロークのポインタが、exist
 # 頂点を指してしまう現象(実データでは常に0%)を抑制する。self_loop_lossと同じ理由で新規の損失のため暫定値とする
 SYNTHETIC_CROSSING_WEIGHT = 1.0  # 生成側crossings頻度を実データの頻度分布に近づけるmoment matching損失。
 # 既存コードに対応物が存在しない新規の損失のため暫定値とする
+LONG_CHORD_LOSS_WEIGHT = 1.0  # 後方(出現頻度の低い)スロットのポインタが無関係な既存頂点を選んでしまい、
+# キャンバスを横断する不自然に長いストロークができる現象(reconstructionでは終点ポインタ精度99.88%、
+# 混ぜ合わせ生成でのみ発生することを実測で確認済み)を抑制する。既存コードに対応物が存在しない
+# 新規の損失のため暫定値とする
+LONG_CHORD_THRESHOLD_RATIO = 3.0  # 同じサンプル内の弦長の中央値に対してこの倍率を超えたら罰する。
+# 実測した異常事例(弦長59〜78)がその字の他のストロークの弦長(7〜52)に対して数倍だったことに基づく暫定値
 
 
 def _synthetic_existence_mask(existence_logits: torch.Tensor) -> torch.Tensor:
@@ -48,57 +55,78 @@ def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor,
     return model.decode(z_synthetic, detach_slots=detach_slots)
 
 
-def _compute_self_loop_penalty(
-    start_logits: torch.Tensor, end_logits: torch.Tensor, existence: torch.Tensor
-) -> torch.Tensor:
+def _compute_self_loop_penalty(p_start: torch.Tensor, p_end: torch.Tensor, existence: torch.Tensor) -> torch.Tensor:
     # 始点・終点ポインタのsoftmax分布の内積を「衝突確率」(2つの分布から独立にサンプリングした場合に
     # 同じ頂点を選んでしまう確率)として使う。コサイン類似度と異なり正規化しないため、分布の鋭さ
     # (自信度)も反映した、実際に防ぎたい事象(自己ループ)に直接対応する量になる
-    p_start = F.softmax(start_logits, dim=-1)
-    p_end = F.softmax(end_logits, dim=-1)
     collision_probability = (p_start * p_end).sum(dim=-1)
     return (collision_probability * existence).sum(dim=1).mean()
 
 
 def _compute_phantom_reference_penalty(
-    start_logits: torch.Tensor,
-    end_logits: torch.Tensor,
-    vertex_existence_logits: torch.Tensor,
-    existence: torch.Tensor,
+    p_start: torch.Tensor, p_end: torch.Tensor, vertex_existence_logits: torch.Tensor, existence: torch.Tensor
 ) -> torch.Tensor:
     # start/endそれぞれのポインタのsoftmax分布と、頂点ごとの「存在しない確率」(1 - sigmoid(existence
     # logit))の内積を、「存在しないと判定された頂点を指してしまう期待確率」として使う。self_loop_loss
     # (2つの分布の衝突確率)と同じ発想。existence logitはdetachする(この損失がポインタ側だけを動かし、
     # existenceヘッド側を「全部存在するとみなす」ことで安く損失を消す抜け道を防ぐため)
     non_existence_probability = 1.0 - torch.sigmoid(vertex_existence_logits.detach())
-    p_start = F.softmax(start_logits, dim=-1)
-    p_end = F.softmax(end_logits, dim=-1)
     phantom_probability = (p_start + p_end) @ non_existence_probability.unsqueeze(-1)
     return (phantom_probability.squeeze(-1) * existence).sum(dim=1).mean()
 
 
+def _compute_long_chord_penalty(
+    p_start: torch.Tensor,
+    p_end: torch.Tensor,
+    vertex_features: torch.Tensor,
+    existence: torch.Tensor,
+    vertex_std: torch.Tensor,
+) -> torch.Tensor:
+    # start_points/end_pointsは_pointer内でselectionをdetachして計算されており、ここから弦長を
+    # 求めても勾配がポインタのロジットまで届かない。そのためself_loop_loss等と同じくsoftmax分布
+    # から直接ソフトな(勾配が通る)始点・終点を計算し直す。頂点特徴量はdetachし、ポインタの重み
+    # だけを教師する(vertex_feature_headや共有Transformerを経由した副作用を防ぐ)
+    vertex_features_detached = vertex_features.detach()
+    soft_start = torch.bmm(p_start, vertex_features_detached)
+    soft_end = torch.bmm(p_end, vertex_features_detached)
+    chord = ((soft_end - soft_start) * vertex_std).norm(dim=-1)
+
+    # 中央値は1本の外れ値に引っ張られにくい頑健な統計量。勾配は不要(分子側のchordだけを動かしたい)。
+    # 存在するストロークが1本もないサンプルではnanmedianがnanを返し、下流のratio・penaltyが
+    # nanに汚染される(nan*0はnanでありexistenceマスクでは防げない)ため、nan_to_numで置き換える。
+    # 置き換え先の値はexistence=0の行では最終的にpenalty*existence=0で無視されるため何でもよい
+    with torch.no_grad():
+        chord_for_median = torch.where(existence.bool(), chord, torch.full_like(chord, float("nan")))
+        median_chord = torch.nanmedian(chord_for_median, dim=1, keepdim=True).values
+        median_chord = torch.nan_to_num(median_chord, nan=MIN_DIRECTION_NORM)
+
+    ratio = chord / (median_chord + MIN_DIRECTION_NORM)
+    penalty = torch.clamp(ratio - LONG_CHORD_THRESHOLD_RATIO, min=0.0)
+    return (penalty * existence).sum(dim=1).mean()
+
+
 def _compute_pointer_penalty_losses(
-    model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # self_loop_loss・phantom_reference_lossはいずれも、教師すべきなのはポインタの各headの重みだけであり、
-    # vertex_features等と共有されているTransformer出力(slots)自体を変える必要はない(detach_slots=True)。
-    # self_loop_lossでは、detachしないと混ぜ合わせz(実データより自由度が高い領域)での学習を通じて、
-    # 共有されたslotsを経由し頂点座標側に意図しない副作用(過剰接続の悪化)が漏れることを実測で確認済み。
-    # phantom_reference_lossは同じ構造(ポインタのみを教師する合成z上の損失)のため同じ設計を予防的に
-    # 適用しているが、こちら単体でdetach_slots=Falseにした場合の副作用は個別には検証していない。
-    # 両損失とも同じdetach_slots=Trueで済むため、合成zの構築・decodeを1回で共有する(2回計算する無駄を避ける)
+    model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor, vertex_std: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # self_loop_loss・phantom_reference_loss・long_chord_lossはいずれも、教師すべきなのはポインタの
+    # 各headの重みだけであり、vertex_features等と共有されているTransformer出力(slots)自体を変える
+    # 必要はない(detach_slots=True)。self_loop_lossでは、detachしないと混ぜ合わせz(実データより
+    # 自由度が高い領域)での学習を通じて、共有されたslotsを経由し頂点座標側に意図しない副作用
+    # (過剰接続の悪化)が漏れることを実測で確認済み。phantom_reference_loss・long_chord_lossは同じ
+    # 構造(ポインタのみを教師する合成z上の損失)のため同じ設計を予防的に適用しているが、それぞれ
+    # 単体でdetach_slots=Falseにした場合の副作用は個別には検証していない。3損失とも同じ
+    # detach_slots=Trueで済むため、合成zの構築・decodeを1回で共有する(3回計算する無駄を避ける)
     decoder_output = _decode_synthetic_batch(model, mu, mu_pool, detach_slots=True)
     existence = _synthetic_existence_mask(decoder_output.stroke_existence_logits)
-    self_loop = _compute_self_loop_penalty(
-        decoder_output.start_pointer_logits, decoder_output.end_pointer_logits, existence
-    )
+    # 3損失とも同じstart/endポインタのsoftmax分布を使うため、ここで1回だけ計算して使い回す
+    p_start = F.softmax(decoder_output.start_pointer_logits, dim=-1)
+    p_end = F.softmax(decoder_output.end_pointer_logits, dim=-1)
+    self_loop = _compute_self_loop_penalty(p_start, p_end, existence)
     phantom_reference = _compute_phantom_reference_penalty(
-        decoder_output.start_pointer_logits,
-        decoder_output.end_pointer_logits,
-        decoder_output.vertex_existence_logits,
-        existence,
+        p_start, p_end, decoder_output.vertex_existence_logits, existence
     )
-    return self_loop, phantom_reference
+    long_chord = _compute_long_chord_penalty(p_start, p_end, decoder_output.vertex_features, existence, vertex_std)
+    return self_loop, phantom_reference, long_chord
 
 
 def _huber(residual: torch.Tensor, delta: float) -> torch.Tensor:
@@ -165,7 +193,9 @@ def compute_synthetic_loss(
     # self_loop_loss・phantom_reference_loss(detach_slots=True)とcrossing_loss(detach_slots=False)は
     # 必要なdetach設定が異なるため、crossing_lossだけ独立に合成zを構築・decodeする
     losses: dict[str, torch.Tensor] = {}
-    losses["self_loop_loss"], losses["phantom_reference_loss"] = _compute_pointer_penalty_losses(model, mu, mu_pool)
+    losses["self_loop_loss"], losses["phantom_reference_loss"], losses["long_chord_loss"] = (
+        _compute_pointer_penalty_losses(model, mu, mu_pool, vertex_std)
+    )
     losses["synthetic_crossing_loss"] = _compute_synthetic_crossing_loss(
         model, mu, mu_pool, vertex_std, stroke_offset_mean, stroke_offset_std,
         target_crossings_mean, target_crossings_std,
@@ -176,6 +206,7 @@ def compute_synthetic_loss(
         "self_loop_loss": SELF_LOOP_LOSS_WEIGHT,
         "phantom_reference_loss": PHANTOM_REFERENCE_LOSS_WEIGHT,
         "synthetic_crossing_loss": SYNTHETIC_CROSSING_WEIGHT,
+        "long_chord_loss": LONG_CHORD_LOSS_WEIGHT,
     }
     total = sum(weights.get(name, 1.0) * value for name, value in losses.items())
     return SyntheticLossComponents(total=total, **losses)
