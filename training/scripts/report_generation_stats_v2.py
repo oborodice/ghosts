@@ -425,7 +425,7 @@ def main() -> None:
     torch.manual_seed(SEED)
     z_raw = torch.randn(SAMPLE_COUNT, checkpoint.latent_dim, device=device)
     with torch.no_grad():
-        z = attract_to_latent_prior(z_raw, mu_real)
+        z, _ = attract_to_latent_prior(z_raw, mu_real)
         decoder_output = decode_in_chunks(checkpoint.model, z)
 
     _evaluate_and_report("generated (current production checkpoint)", checkpoint, decoder_output, angle_gmm)

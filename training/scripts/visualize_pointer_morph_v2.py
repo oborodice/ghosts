@@ -61,7 +61,7 @@ def _interpolated_z(mu_a: torch.Tensor, mu_b: torch.Tensor, steps: int) -> torch
 def _decode_morph(checkpoint: Checkpoint, mu_a: torch.Tensor, mu_b: torch.Tensor, mu_real: torch.Tensor) -> MorphFrames:
     z_interp = _interpolated_z(mu_a, mu_b, MORPH_STEPS)
     with torch.no_grad():
-        z = attract_to_latent_prior(z_interp, mu_real)
+        z, _ = attract_to_latent_prior(z_interp, mu_real)
         decoder_output = checkpoint.model.decode(z)
     existence_mask = existence_mask_from_logits(decoder_output.stroke_existence_logits)
     return MorphFrames(decoder_output, existence_mask)

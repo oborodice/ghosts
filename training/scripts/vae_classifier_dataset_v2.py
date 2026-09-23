@@ -57,7 +57,7 @@ def _sample_candidates(
     oversample = int(count * 1.2) + 50
     z_raw = torch.randn(oversample, checkpoint.latent_dim, device=mu_real.device)
     with torch.no_grad():
-        z = attract_to_latent_prior(z_raw, mu_real)
+        z, _ = attract_to_latent_prior(z_raw, mu_real)
         nearest_dist = torch.cdist(z, mu_real).min(dim=1).values
         decoder_output = checkpoint.model.decode(z)
     strokes = reconstructed_strokes_real(checkpoint, decoder_output)

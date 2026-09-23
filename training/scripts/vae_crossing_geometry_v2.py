@@ -188,6 +188,31 @@ def polyline_crossing_points(points: torch.Tensor) -> tuple[torch.Tensor, torch.
     return crossing, point
 
 
+def interior_touch_mask(
+    points: torch.Tensor, existence: torch.Tensor, connection_threshold: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # ストロークの始点・終点それぞれが、別の実在ストロークの経路の内部区間(CROSSING_GATE_LOW〜HIGH、
+    # 端点付近を除く)にconnection_threshold未満で近いか(=頂点表現では捉えられない中間分岐)を判定する。
+    # pointsはbezier_polyline_pointsが返すポリライン(B, stroke_count, segment_count+1, 2)で、
+    # points[:, :, 0]・points[:, :, -1]がそれぞれ始点・終点にあたる
+    batch_size, stroke_count, n_points, _ = points.shape
+    position = torch.linspace(0, 1, n_points, device=points.device)
+    interior = (position > CROSSING_GATE_LOW) & (position < CROSSING_GATE_HIGH)  # (n_points,)
+    not_self = ~torch.eye(stroke_count, dtype=torch.bool, device=points.device)  # (stroke_count(i), stroke_count(j))
+    other_exists = existence.bool().view(batch_size, 1, stroke_count, 1)  # (B, 1, j, 1)
+    valid = interior.view(1, 1, 1, n_points) & not_self.view(1, stroke_count, stroke_count, 1) & other_exists
+
+    def _touch(endpoint: torch.Tensor) -> torch.Tensor:
+        # endpoint: (B, stroke_count, 2) -- 全ストロークjの全内部点との距離を一度に計算する
+        dist = torch.cdist(endpoint, points.reshape(batch_size, stroke_count * n_points, 2))
+        dist = dist.reshape(batch_size, stroke_count, stroke_count, n_points)  # (B, i, j, k)
+        dist = torch.where(valid, dist, torch.full_like(dist, float("inf")))
+        min_dist = dist.amin(dim=(2, 3))  # (B, i) -- 他の全ストロークjの内部点のうち最も近いもの
+        return (min_dist < connection_threshold) & existence.bool()
+
+    return _touch(points[:, :, 0]), _touch(points[:, :, -1])
+
+
 def polyline_diagonal_involved_mask(
     crossing: torch.Tensor, angle: torch.Tensor, axis_tolerance_deg: float
 ) -> torch.Tensor:

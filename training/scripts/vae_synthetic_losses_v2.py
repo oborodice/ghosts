@@ -44,7 +44,7 @@ def _decode_synthetic_batch(model: VAE, mu: torch.Tensor, mu_pool: torch.Tensor,
     # がいずれも最初に行う共通処理。z_rawの件数はmu(このバッチの実データ数)に合わせるが、引き寄せ先は
     # mu_poolでありこのバッチ自体ではない。decoderへ勾配を通す必要があるためno_gradにはしない
     z_raw = torch.randn(mu.shape[0], mu_pool.shape[1], device=mu_pool.device)
-    z_synthetic = attract_to_pool(z_raw, mu_pool, KERNEL_BANDWIDTH)
+    z_synthetic, _ = attract_to_pool(z_raw, mu_pool, KERNEL_BANDWIDTH)
     return model.decode(z_synthetic, detach_slots=detach_slots)
 
 
