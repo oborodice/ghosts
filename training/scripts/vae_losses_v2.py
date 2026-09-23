@@ -187,12 +187,15 @@ def _compute_angle_naturalness_loss(
 ) -> torch.Tensor:
     # 正解の角度自体が非典型的な場合(実データにも一定数存在する)に再構成をそこから引き離してしまわないよう、
     # 絶対的な自然さではなく正解と比較した相対的な自然さで評価する。正解通りに再構成できていれば
-    # (正解が非典型的でも)ペナルティが発生しないようにする
+    # (正解が非典型的でも)ペナルティが発生しないようにする。片側(recon側が不自然な場合のみ)を
+    # 罰する設計だと、密度の高い方向(軸に沿った角度)へのズレは常に無罰になり、密度の低い方向への
+    # ズレだけが引き戻される非対称な誘因が生まれる。これにより低密度な角度が高密度な角度へ集団的に
+    # 侵食されていく現象を実データで確認したため、両方向を対称に罰する絶対値を使う
     true_angle, true_well_defined = _safe_angle(_direction_real(true_start, true_end, vertex_mean, vertex_std))
     recon_angle, recon_well_defined = _safe_angle(_direction_real(recon_start, recon_end, vertex_mean, vertex_std))
     true_log_density = angle_log_density(true_angle, angle_gmm)
     recon_log_density = angle_log_density(recon_angle, angle_gmm)
-    penalty = torch.clamp(true_log_density - recon_log_density, min=0.0)
+    penalty = (true_log_density - recon_log_density).abs()
     mask = existence * true_well_defined * recon_well_defined
     return (penalty * mask).sum(dim=1).mean()
 
