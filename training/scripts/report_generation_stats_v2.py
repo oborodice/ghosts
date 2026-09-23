@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from extract_stroke_features_v2 import CONNECTION_THRESHOLD
-from vae_checkpoint_v2 import load_checkpoint
+from vae_checkpoint_v2 import Checkpoint, load_checkpoint
 from vae_crossing_geometry_v2 import bezier_polyline_points, polyline_crossing_points, polyline_diagonal_involved_mask
 from vae_data_v2 import prepare_datasets
 from vae_eval_common import (
@@ -19,6 +19,7 @@ from vae_eval_common import (
     SEGMENTS_PER_CURVE,
     existence_mask_from_logits,
 )
+from vae_classifier_dataset_v2 import VIEWBOX_SIZE
 from vae_eval_common_v2 import (
     attract_to_latent_prior,
     duplicate_slot_pairs,
@@ -27,14 +28,25 @@ from vae_eval_common_v2 import (
     reconstructed_strokes_real,
     to_real_scale,
     true_strokes_real,
+    vertex_distance_real,
 )
 from vae_losses import AngleGMM, angle_log_density, build_angle_gmm
 from vae_losses_v2 import MIN_DIRECTION_NORM
-from vae_model_v2 import CHECKPOINT_PATH, select_device
+from vae_model_v2 import CHECKPOINT_PATH, DecoderOutput, VAE, select_device
 from vae_synthetic_losses import masked_mean_std
 
 SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値(歴史的な比較のため)
 SEED = 0
+DECODE_CHUNK_SIZE = 500  # 実データ全件(9735件)を1回のforwardでdecodeするとMPSでメモリ不足に
+# なりやすい(実測: 落ちることがある)ため、この件数ずつに分けてdecodeし結果を連結する
+
+
+def decode_in_chunks(model: VAE, z: torch.Tensor, chunk_size: int = DECODE_CHUNK_SIZE) -> DecoderOutput:
+    # model.decode(z)を1回のforwardで全件処理すると、件数が大きい場合(実データ全件9735件等)に
+    # MPSでメモリ不足になりやすい。数値結果は分割しても変わらないため、chunk_size件ずつdecodeして
+    # DecoderOutputの各フィールドをバッチ次元で連結する
+    chunks = [model.decode(z[i : i + chunk_size]) for i in range(0, len(z), chunk_size)]
+    return DecoderOutput(*(torch.cat(field, dim=0) for field in zip(*chunks)))
 
 
 def isolated_stroke_counts(
@@ -205,6 +217,27 @@ def _stroke_length(start_points: np.ndarray, end_points: np.ndarray, existence: 
     return mean[valid].mean().item()
 
 
+def _stroke_count(existence: np.ndarray) -> float:
+    # 1字あたりの実在ストローク数の平均
+    return existence.astype(bool).sum(axis=1).mean()
+
+
+def _canvas_occupancy(vertex_positions: np.ndarray, vertex_existence: np.ndarray) -> float:
+    # 実在頂点の外接矩形が、キャンバス全体(KanjiVGのviewBox、VIEWBOX_SIZE四方)に対してどの程度の
+    # 面積を占めるか(12-BQで定義・測定した指標)。頂点が1個以下の字は外接矩形の面積が0になり
+    # 占有率の意味を持たないため除外する(_stroke_lengthのcount<2除外と同じ考え方)
+    mask = vertex_existence.astype(bool)
+    ratios = []
+    for i in range(len(vertex_positions)):
+        active = vertex_positions[i, mask[i]]
+        if len(active) < 2:
+            continue
+        width = active[:, 0].max() - active[:, 0].min()
+        height = active[:, 1].max() - active[:, 1].min()
+        ratios.append((width * height) / (VIEWBOX_SIZE**2))
+    return float(np.mean(ratios)) if ratios else float("nan")
+
+
 def _report(
     label: str,
     start_points: np.ndarray,
@@ -212,6 +245,8 @@ def _report(
     offsets: np.ndarray,
     existence: np.ndarray,
     angle_gmm: AngleGMM,
+    vertex_positions: np.ndarray,
+    vertex_existence: np.ndarray,
 ) -> None:
     crossings, diag, triple = crossings_and_triple_junctions(start_points, end_points, offsets, existence)
     print(f"--- {label} (n={len(start_points)}) ---")
@@ -222,6 +257,8 @@ def _report(
           f"{_angle_naturalness_log_density(start_points, end_points, existence, angle_gmm):.3f}")
     print(f"offset_std = {_offset_std(offsets, existence):.4f}")
     print(f"stroke_length mean = {_stroke_length(start_points, end_points, existence):.3f}")
+    print(f"stroke_count mean = {_stroke_count(existence):.3f}")
+    print(f"canvas_occupancy mean = {_canvas_occupancy(vertex_positions, vertex_existence) * 100:.1f}%")
     print()
 
 
@@ -260,6 +297,45 @@ def _report_pointer_integrity(
         f"{_phantom_reference_rate(start_index, vertex_existence_mask, existence):.2f}% / "
         f"{_phantom_reference_rate(end_index, vertex_existence_mask, existence):.2f}%"
     )
+    print()
+
+
+def _evaluate_and_report(
+    label: str, checkpoint: Checkpoint, decoder_output: DecoderOutput, angle_gmm: AngleGMM
+) -> None:
+    # decode結果(reconstruction・generatedのどちらも同じDecoderOutput形状)から、_report・
+    # _report_pointer_integrityに渡す実スケールのストローク・頂点データを組み立てる共通処理。
+    # 「real data」はDecoderOutputではなくデータセット由来のテンソルを直接使う(ポインタも
+    # argmaxではなく正解のstroke_vertex_indices)ため、ここには含めない
+    strokes = reconstructed_strokes_real(checkpoint, decoder_output)
+    existence = existence_mask_from_logits(decoder_output.stroke_existence_logits)
+    vertex_existence_mask = existence_mask_from_logits(decoder_output.vertex_existence_logits)
+    vertex_positions = to_real_scale(decoder_output.vertex_features, checkpoint.vertex_mean, checkpoint.vertex_std)
+    _report(
+        label, strokes.start, strokes.end, strokes.offsets, existence, angle_gmm,
+        vertex_positions, vertex_existence_mask,
+    )
+    _report_pointer_integrity(
+        label,
+        _pointer_targets(decoder_output.start_pointer_logits),
+        _pointer_targets(decoder_output.end_pointer_logits),
+        vertex_existence_mask,
+        existence,
+    )
+
+
+def _print_vertex_reconstruction_error(
+    vertices: torch.Tensor,
+    existence: torch.Tensor,
+    vertices_recon: torch.Tensor,
+    vertex_mean: torch.Tensor,
+    vertex_std: torch.Tensor,
+) -> None:
+    # 実スケールでの頂点再構成誤差(step13の申し送り・12-BOのH5で繰り返し参照される値)。
+    # 正解が存在しない合成z側(generated)には適用できないため、reconstruction専用の別枠にする
+    distances = vertex_distance_real(vertices, existence, vertices_recon, vertex_mean, vertex_std)
+    print("--- reconstruction (encode -> decode(mu)): vertex accuracy ---")
+    print(f"vertex reconstruction error (real-scale) mean = {distances.mean():.4f}")
     print()
 
 
@@ -327,48 +403,32 @@ def main() -> None:
     true_strokes = true_strokes_real(checkpoint, train_batch)
     true_existence = train_batch.stroke_existence.cpu().numpy().astype(bool)
     true_vertex_existence_mask = train_batch.vertex_existence.cpu().numpy().astype(bool)
+    true_vertex_positions = to_real_scale(train_batch.vertices, checkpoint.vertex_mean, checkpoint.vertex_std)
     true_start_index = train_batch.stroke_vertex_indices[..., 0].cpu().numpy()
     true_end_index = train_batch.stroke_vertex_indices[..., 1].cpu().numpy()
-    _report("real data", true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence, angle_gmm)
+    _report(
+        "real data", true_strokes.start, true_strokes.end, true_strokes.offsets, true_existence, angle_gmm,
+        true_vertex_positions, true_vertex_existence_mask,
+    )
     _report_pointer_integrity(
         "real data", true_start_index, true_end_index, true_vertex_existence_mask, true_existence
     )
 
     with torch.no_grad():
-        recon_output = checkpoint.model.decode(mu_real)
-    recon_strokes = reconstructed_strokes_real(checkpoint, recon_output)
-    recon_existence = existence_mask_from_logits(recon_output.stroke_existence_logits)
-    _report(
-        "reconstruction (encode -> decode(mu))",
-        recon_strokes.start, recon_strokes.end, recon_strokes.offsets, recon_existence, angle_gmm,
-    )
-    _report_pointer_integrity(
-        "reconstruction (encode -> decode(mu))",
-        _pointer_targets(recon_output.start_pointer_logits),
-        _pointer_targets(recon_output.end_pointer_logits),
-        existence_mask_from_logits(recon_output.vertex_existence_logits),
-        recon_existence,
+        recon_output = decode_in_chunks(checkpoint.model, mu_real)
+    _evaluate_and_report("reconstruction (encode -> decode(mu))", checkpoint, recon_output, angle_gmm)
+    _print_vertex_reconstruction_error(
+        train_batch.vertices, train_batch.vertex_existence, recon_output.vertex_features,
+        checkpoint.vertex_mean, checkpoint.vertex_std,
     )
 
     torch.manual_seed(SEED)
     z_raw = torch.randn(SAMPLE_COUNT, checkpoint.latent_dim, device=device)
     with torch.no_grad():
         z = attract_to_latent_prior(z_raw, mu_real)
-        decoder_output = checkpoint.model.decode(z)
+        decoder_output = decode_in_chunks(checkpoint.model, z)
 
-    generated_strokes = reconstructed_strokes_real(checkpoint, decoder_output)
-    generated_existence = existence_mask_from_logits(decoder_output.stroke_existence_logits)
-    _report(
-        "generated (current production checkpoint)",
-        generated_strokes.start, generated_strokes.end, generated_strokes.offsets, generated_existence, angle_gmm,
-    )
-    _report_pointer_integrity(
-        "generated (current production checkpoint)",
-        _pointer_targets(decoder_output.start_pointer_logits),
-        _pointer_targets(decoder_output.end_pointer_logits),
-        existence_mask_from_logits(decoder_output.vertex_existence_logits),
-        generated_existence,
-    )
+    _evaluate_and_report("generated (current production checkpoint)", checkpoint, decoder_output, angle_gmm)
 
     _print_duplicate_slot_check(
         decoder_output.vertex_features, decoder_output.vertex_existence_logits,

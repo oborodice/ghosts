@@ -72,8 +72,9 @@ $ uv run scripts/sweep_vae_v2.py
 $ uv run scripts/visualize_reconstruction_v2.py
 
 # 混ぜ合わせ生成(事前分布サンプル+attract_to_latent_prior)時の孤立率・3本以上合流・交差・角度の
-# 自然さ・offset分散・ストローク長を、実データ・reconstructionと比較できる一貫した方法で数値化する。
-# あわせて、頂点の重複スロットが3本以上合流のカウントを狂わせていないか、ポインタの構造的な破綻
+# 自然さ・offset分散・ストローク長・ストローク数・キャンバス占有率を、実データ・reconstructionと
+# 比較できる一貫した方法で数値化する。あわせて、reconstructionの頂点再構成誤差(実スケール)、
+# 頂点の重複スロットが3本以上合流のカウントを狂わせていないか、ポインタの構造的な破綻
 # (自己ループ・幽霊参照)の頻度も確認する。`--checkpoint`で評価対象のVAEチェックポイントを指定できる
 # (省略時は既定のチェックポイント)
 $ uv run scripts/report_generation_stats_v2.py
