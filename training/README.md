@@ -151,6 +151,8 @@ $ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path] [--remote
 $ ./scripts/runpod_check_progress.sh <ip> <port> [n-lines]
 
 # チェックポイント・train.logをダウンロードする(省略時は最新のチェックポイントを対象にする)。
+# ダウンロード成功後、Network Volume上の当該ディレクトリの*.ptを全て削除してクォータを空ける
+# (podを使い回すたびに複数世代のチェックポイントが積み上がりクォータ超過する事故を防ぐため)。
 # --remote-dirは上と対応する配置先を指定する場合のみ
 $ ./scripts/runpod_download_results.sh <ip> <port> [remote-checkpoint-name|latest] [local-name] [--remote-dir <path>]
 

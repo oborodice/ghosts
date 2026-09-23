@@ -67,3 +67,10 @@ if [ -n "${LOCAL_NAME}" ]; then
   mv "${LOCAL_CHECKPOINT_DIR}/${REMOTE_NAME%.pt}_train.log" "${LOCAL_CHECKPOINT_DIR}/${LOCAL_NAME%.pt}_train.log"
   echo "Renamed to ${LOCAL_NAME}"
 fi
+
+# ダウンロードが成功した(setの-eによりここまで来た時点でscpは両方成功している)ことを確認できたので、
+# Network Volume上の*.pt(このディレクトリの全実行分、resume用含む)を削除してクォータを空ける。
+# 使い回すpod上に複数世代のチェックポイントが積み上がり20GBクォータを超過する事故が繰り返し起きていたため
+echo "Cleaning up remote checkpoints in ${REMOTE_DIR}/data/checkpoints ..."
+ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
+  "rm -f ${REMOTE_DIR}/data/checkpoints/*.pt"
