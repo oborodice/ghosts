@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from extract_stroke_features_v2 import CONNECTION_THRESHOLD
 from vae_crossing_geometry_v2 import fold_point, folded_crossing_mask, folded_crossing_strength
 from vae_losses import AngleGMM, angle_log_density, off_diagonal_exist_pairs
-from vae_model_v2 import DecoderOutput
+from vae_model_v2 import VERTEX_BIN_EDGES, DecoderOutput
 
 
 class LossComponents(NamedTuple):
@@ -54,6 +54,15 @@ def pointer_loss(logits: torch.Tensor, target_index: torch.Tensor, stroke_existe
     # dim=1に持ってくるためtransposeする
     per_stroke_loss = F.cross_entropy(logits.transpose(1, 2), target_index, reduction="none")
     return (per_stroke_loss * stroke_existence).sum(dim=1).mean()
+
+
+def _vertex_bin_loss(logits: torch.Tensor, true_coord: torch.Tensor, existence: torch.Tensor) -> torch.Tensor:
+    # 頂点座標(標準化空間)をVERTEX_BIN_EDGESで区切ったビンのインデックスに変換し、
+    # マスク付きcross entropy分類として教師する(pointer_lossと数式上同一のためそのまま流用する)。
+    # 範囲外の値はbucketizeにより自動的に最初/最後のビンにクリップされる(実データは範囲内に収まる想定)
+    edges = VERTEX_BIN_EDGES.to(true_coord.device)
+    true_bin = torch.bucketize(true_coord.contiguous(), edges[1:-1])
+    return pointer_loss(logits, true_bin, existence)
 
 
 def _true_stroke_points(
@@ -245,8 +254,8 @@ def _compute_vertex_repulsion_loss(
     vertex_std: torch.Tensor,
 ) -> torch.Tensor:
     # 正解で離れているはずの頂点ペアが、再構成でCONNECTION_THRESHOLD未満まで近づいたら
-    # ペナルティを与える。crossing/angleと異なりストロークの端点(points)ではなく頂点スロット
-    # (vertex_features)自体を直接動かす損失であり、ポインタの選択を経由しないためdetachは不要
+    # ペナルティを与える。recon_verticesは呼び出し元で既にdetach済みのため、この損失自体は
+    # 学習には寄与せず、頂点衝突の発生状況を追跡する監視指標として機能する
     weights = _vertex_repulsion_pair_weights(true_vertices, vertex_existence, vertex_mean, vertex_std)
     recon_distance = _pairwise_vertex_distance_real(recon_vertices, vertex_mean, vertex_std)
     penalty = torch.clamp(CONNECTION_THRESHOLD - recon_distance, min=0.0)
@@ -277,8 +286,11 @@ def compute_loss(
     # totalの合計式・LossComponentsへの詰め替えを手書きしない構成にしている
     losses: dict[str, torch.Tensor] = {}
 
-    vertex_mask = vertex_existence.unsqueeze(-1)
-    losses["vertex_loss"] = (((decoder_output.vertex_features - vertices) ** 2) * vertex_mask).sum(dim=(1, 2)).mean()
+    # 頂点座標はMSEでなくビンの分類(cross entropy)で教師する。MSEは紛らわしい候補の平均に
+    # 寄せてしまうが、分類+argmaxなら候補の中で最も典型的な(最頻の)値にそのまま収束する
+    vertex_x_loss = _vertex_bin_loss(decoder_output.vertex_x_logits, vertices[..., 0], vertex_existence)
+    vertex_y_loss = _vertex_bin_loss(decoder_output.vertex_y_logits, vertices[..., 1], vertex_existence)
+    losses["vertex_loss"] = vertex_x_loss + vertex_y_loss
     losses["vertex_existence_loss"] = (
         F.binary_cross_entropy_with_logits(decoder_output.vertex_existence_logits, vertex_existence, reduction="none")
         .sum(dim=1)
@@ -308,6 +320,12 @@ def compute_loss(
 
     losses["kl_divergence"] = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
 
+    # decoder_output.vertex_features・start_points・end_pointsはモデル側で既にdetachされており、
+    # 頂点座標の学習は自身の分類損失(vertex_loss)だけが担う。そのためangle_naturalness_loss・
+    # min_length_loss・vertex_repulsion_lossはここから先勾配を持たず(requires_grad=False)、
+    # 学習には寄与しない純粋な監視指標として算出・ログ出力される(生成結果の幾何的な品質を
+    # 追跡する目的で残す)。crossing_lossだけはstroke_offsets(detachされていない、
+    # stroke_offset_headの出力)も入力に取るため、そちら側の学習には引き続き寄与する
     true_start, true_end = _true_stroke_points(vertices, stroke_vertex_indices)
     losses["crossing_loss"] = _compute_crossing_loss(
         true_start, true_end, stroke_offsets,

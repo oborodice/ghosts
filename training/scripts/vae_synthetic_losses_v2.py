@@ -85,7 +85,7 @@ def _compute_long_chord_penalty(
     # start_points/end_pointsは_pointer内でselectionをdetachして計算されており、ここから弦長を
     # 求めても勾配がポインタのロジットまで届かない。そのためself_loop_loss等と同じくsoftmax分布
     # から直接ソフトな(勾配が通る)始点・終点を計算し直す。頂点特徴量はdetachし、ポインタの重み
-    # だけを教師する(vertex_feature_headや共有Transformerを経由した副作用を防ぐ)
+    # だけを教師する(vertex_x_head・vertex_y_headや共有Transformerを経由した副作用を防ぐ)
     vertex_features_detached = vertex_features.detach()
     soft_start = torch.bmm(p_start, vertex_features_detached)
     soft_end = torch.bmm(p_end, vertex_features_detached)

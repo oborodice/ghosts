@@ -27,6 +27,16 @@ SLOT_ATTENTION_FFN_DIM = 512
 VERTEX_TOKEN_TYPE = 0
 STROKE_TOKEN_TYPE = 1
 
+# 頂点座標を回帰でなく、標準化空間[-VERTEX_BIN_RANGE, VERTEX_BIN_RANGE]を
+# VERTEX_BIN_COUNT分割したビンの分類として扱う(MSEの「平均への回帰」を、cross-entropy+argmaxの
+# 「最頻値への収束」に置き換える設計)。範囲・分割数は実データの標準化後の座標分布(実測で概ね±2.1)に
+# 余裕を持たせつつ、ビン幅が実スケール換算で約2.5単位(現行のMSEベース頂点再構成誤差13〜21より
+# 十分小さい)になるよう較正した値
+VERTEX_BIN_COUNT = 50
+VERTEX_BIN_RANGE = 2.5
+VERTEX_BIN_EDGES = torch.linspace(-VERTEX_BIN_RANGE, VERTEX_BIN_RANGE, VERTEX_BIN_COUNT + 1)
+VERTEX_BIN_CENTERS = (VERTEX_BIN_EDGES[:-1] + VERTEX_BIN_EDGES[1:]) / 2
+
 # 学習時の保存先であると同時に、将来の推論/生成スクリプトの読み込み先でもある
 CHECKPOINT_PATH = Path(__file__).resolve().parent.parent / "data" / "checkpoints" / "vae_v2.pt"
 
@@ -58,7 +68,9 @@ class SlotAttentionConfig(NamedTuple):
 
 
 class DecoderOutput(NamedTuple):
-    vertex_features: torch.Tensor  # (B, vertex_count, vertex_feature_dim)
+    vertex_features: torch.Tensor  # (B, vertex_count, vertex_feature_dim) -- ビン選択をソフトデコードした連続値(標準化空間)
+    vertex_x_logits: torch.Tensor  # (B, vertex_count, VERTEX_BIN_COUNT)
+    vertex_y_logits: torch.Tensor  # (B, vertex_count, VERTEX_BIN_COUNT)
     vertex_existence_logits: torch.Tensor  # (B, vertex_count)
     stroke_offsets: torch.Tensor  # (B, stroke_count, stroke_feature_dim)
     stroke_existence_logits: torch.Tensor  # (B, stroke_count)
@@ -91,7 +103,9 @@ class SlotAttentionDecoder(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(layer, num_layers=config.num_layers)
 
-        self.vertex_feature_head = nn.Linear(config.slot_dim, shape.vertex_feature_dim)
+        self.vertex_x_head = nn.Linear(config.slot_dim, VERTEX_BIN_COUNT)
+        self.vertex_y_head = nn.Linear(config.slot_dim, VERTEX_BIN_COUNT)
+        self.register_buffer("vertex_bin_centers", VERTEX_BIN_CENTERS.clone())
         self.vertex_existence_head = nn.Linear(config.slot_dim, 1)
         self.stroke_offset_head = nn.Linear(config.slot_dim, shape.stroke_feature_dim)
         self.stroke_existence_head = nn.Linear(config.slot_dim, 1)
@@ -100,6 +114,22 @@ class SlotAttentionDecoder(nn.Module):
         self.pointer_key_head = nn.Linear(config.slot_dim, config.slot_dim)
         self.pointer_start_query_head = nn.Linear(config.slot_dim, config.slot_dim)
         self.pointer_end_query_head = nn.Linear(config.slot_dim, config.slot_dim)
+
+    def _straight_through_selection(self, logits: torch.Tensor) -> torch.Tensor:
+        # Straight-Through Gumbel-Softmax: 前向き計算は常にone-hot(ハード)だが、学習時の逆伝播は
+        # ハード化前のsoftmax分布を通じて勾配が流れる。推論時はGumbelノイズを乗せず決定的なargmaxで
+        # 選ぶ(ONNX変換後のargmax+gatherと一致させるため)。ポインタ選択・頂点座標のビン選択の
+        # 両方で使う共通ロジック
+        if self.training:
+            return F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=True, dim=-1)
+        return F.one_hot(logits.argmax(dim=-1), num_classes=logits.shape[-1]).to(logits.dtype)
+
+    def _vertex_position(self, logits: torch.Tensor) -> torch.Tensor:
+        # 頂点座標をビンの分類として扱う。selection自体はSTEで微分可能だが、この関数が返す値は
+        # forward側で呼び出し元がdetachする前提(頂点座標を教師する損失はlogitsを直接見るcross
+        # entropyのみで、この座標値自体を経由する下流の損失には学習させない設計のため)
+        selection = self._straight_through_selection(logits)
+        return (selection * self.vertex_bin_centers).sum(dim=-1)
 
     def _pointer(
         self, query_head: nn.Linear, stroke_slots: torch.Tensor, key: torch.Tensor, vertex_features: torch.Tensor
@@ -110,18 +140,12 @@ class SlotAttentionDecoder(nn.Module):
         query = query_head(stroke_slots)  # (B, stroke_count, SLOT_DIM)
         scale = self.pointer_key_head.out_features**0.5
         logits = torch.bmm(query, key.transpose(1, 2)) / scale
+        selection = self._straight_through_selection(logits)
 
-        if self.training:
-            # Straight-Through Gumbel-Softmax: 前向き計算はone-hot(ハード)だが、逆伝播は
-            # ハード化前のsoftmax分布を通じて勾配が流れる
-            selection = F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=True, dim=-1)
-        else:
-            # 推論時はGumbelノイズを乗せず、決定的なargmaxで選ぶ(ONNX変換後のargmax+gatherと一致させるため)
-            selection = F.one_hot(logits.argmax(dim=-1), num_classes=logits.shape[-1]).to(logits.dtype)
-
-        # selectionをdetachすることで、points(→start_points/end_points)を経由する下流の損失の勾配は
-        # vertex_featuresにのみ流れ、logitsには届かない。「どの頂点を参照するか」を学習させたい唯一の
-        # 損失(pointer_loss)は、この経路を経由せずlogitsを直接見て学習する
+        # selectionをdetachすることで、points(→start_points/end_points)を経由する下流の損失からlogits
+        # への逆流を断つ。「どの頂点を参照するか」を学習させたい唯一の損失(pointer_loss)は、この経路を
+        # 経由せずlogitsを直接見て学習する。なおvertex_features自体も呼び出し元で既にdetach済みのため、
+        # pointsはどちらの経路からも下流損失の勾配を受け取らない
         points = torch.bmm(selection.detach(), vertex_features)
         return logits, points
 
@@ -141,7 +165,15 @@ class SlotAttentionDecoder(nn.Module):
             slots = slots.detach()
         vertex_slots, stroke_slots = slots[:, : self.shape.vertex_count], slots[:, self.shape.vertex_count :]
 
-        vertex_features = self.vertex_feature_head(vertex_slots)
+        vertex_x_logits = self.vertex_x_head(vertex_slots)
+        vertex_y_logits = self.vertex_y_head(vertex_slots)
+        # vertex_featuresはdetachする: 頂点座標を教師するcross entropy損失(vertex_x/y_logitsを直接
+        # 見る)はこのdetachの影響を受けないが、vertex_repulsion_loss・start_points/end_points経由の
+        # angle_naturalness_loss等、この値を経由する全ての下流損失からの逆流を断つ。ポインタ機構の
+        # selection.detach()と同じ設計思想(頂点位置の学習は自身の分類損失だけに委ねる)
+        vertex_features = torch.stack(
+            [self._vertex_position(vertex_x_logits), self._vertex_position(vertex_y_logits)], dim=-1
+        ).detach()
         vertex_existence_logits = self.vertex_existence_head(vertex_slots).squeeze(-1)
         stroke_offsets = self.stroke_offset_head(stroke_slots)
         stroke_existence_logits = self.stroke_existence_head(stroke_slots).squeeze(-1)
@@ -157,6 +189,8 @@ class SlotAttentionDecoder(nn.Module):
 
         return DecoderOutput(
             vertex_features,
+            vertex_x_logits,
+            vertex_y_logits,
             vertex_existence_logits,
             stroke_offsets,
             stroke_existence_logits,
