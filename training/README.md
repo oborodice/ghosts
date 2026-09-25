@@ -82,9 +82,14 @@ $ uv run scripts/visualize_reconstruction_v2.py
 # ポインタ・頂点座標を確率加重平均で選ぶソフトデコード(`GENERATION_SOFT_TEMPERATURE`)で作る
 $ uv run scripts/report_generation_stats_v2.py
 
-# 混ぜ合わせ生成でのモーフィング中、ストロークのポインタ(始点・終点の参照先頂点)の割り当てが
-# フレーム間でどれだけ安定しているかを、ソフトポインタ版・ハードポインタ版のチェックポイントで比較する
-$ uv run scripts/visualize_pointer_morph_v2.py
+# 潜在変数をsimplex noiseで動かしたときの、生成結果のなめらかさを数値化する。フレーム間の端点のジャンプ率
+# (信頼区間つき)、zの移動距離あたりのジャンプ回数、ストロークの出現・消失の頻度を出す。
+# 生成時のソフトデコード(`GENERATION_SOFT_TEMPERATURE`)で、ノイズの周期30秒・60秒の2通りを測る
+$ uv run scripts/report_morph_smoothness_v2.py --checkpoint <path>
+
+# simplex noiseで動かした潜在変数から生成した字の変化を、アニメーションGIFとして書き出す目視確認用のツール。
+# 上の診断と同じ軌跡・デコード(周期30秒)で作る
+$ uv run scripts/visualize_morph_gif_v2.py --checkpoint <path> --output morph.gif
 
 # 本物/偽物を、数値特徴量ではなく実際にレンダリングした画像で判別する診断分類器。頂点+ストローク構造
 # (vae_v2.pt)の生成結果に対して使う。数値特徴量では見えている差異が、人間の視覚に近い形
