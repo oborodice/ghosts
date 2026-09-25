@@ -78,7 +78,8 @@ $ uv run scripts/visualize_reconstruction_v2.py
 # (自己ループ・幽霊参照)の頻度、混ぜ合わせ地点(z_blend)のnear_dup_rate(実在字とほぼ重複している
 # 割合)・effective_k(実質何字を混ぜて作られているか)も確認する。後者2つは、合成z領域に新しい
 # 損失を試す際、目的の指標の改善がencoder表現の崩壊の副産物でないかを切り分けるための診断。
-# `--checkpoint`で評価対象のVAEチェックポイントを指定できる(省略時は既定のチェックポイント)
+# `--checkpoint`で評価対象のVAEチェックポイントを指定できる(省略時は既定のチェックポイント)。生成分は、
+# ポインタ・頂点座標を確率加重平均で選ぶソフトデコード(`GENERATION_SOFT_TEMPERATURE`)で作る
 $ uv run scripts/report_generation_stats_v2.py
 
 # 混ぜ合わせ生成でのモーフィング中、ストロークのポインタ(始点・終点の参照先頂点)の割り当てが

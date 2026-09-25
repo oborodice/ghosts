@@ -17,6 +17,11 @@ DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ�
 # 既定値)向けに較正された値
 KERNEL_BANDWIDTH = 1.5
 
+# 生成時のデコードで、ポインタ選択・頂点座標のビン選択を確率加重平均にするsoftmaxの温度(model.decode
+# のsoft_temperature)。argmaxでは、zをわずかに動かしただけで選択が切り替わり、字が飛ぶ。
+# 小さいほどargmaxに近づき、ジャンプが増える。1.0は、試した温度の中でジャンプ率が最も低かった値
+GENERATION_SOFT_TEMPERATURE = 1.0
+
 
 def attract_to_pool(z_raw: torch.Tensor, pool: torch.Tensor, bandwidth: float) -> tuple[torch.Tensor, torch.Tensor]:
     # Nadaraya-Watson推定量(重み付き平均)でz_rawをpoolへ引き寄せる。学習時の合成z構築・生成時の

@@ -4,7 +4,8 @@
 # 定義する。現時点(ハードポインタ)は、頂点トークン(座標+existence)とストロークトークン
 # (参照先頂点へのポインタ+オフセット+existence)の2種類を同じSelf-Attentionスタックに通す。
 # ポインタは学習時のみStraight-Through Gumbel-Softmaxで離散化し、推論時(model.eval())はノイズ無しの
-# argmaxにする(ONNX変換後のargmax+gatherと一致させるため)
+# argmaxにする(ONNX変換後のargmax+gatherと一致させるため)。生成時は、decode(soft_temperature=...)で、
+# この選択を確率加重平均に置き換えられる
 from pathlib import Path
 from typing import NamedTuple
 
@@ -115,24 +116,32 @@ class SlotAttentionDecoder(nn.Module):
         self.pointer_start_query_head = nn.Linear(config.slot_dim, config.slot_dim)
         self.pointer_end_query_head = nn.Linear(config.slot_dim, config.slot_dim)
 
-    def _straight_through_selection(self, logits: torch.Tensor) -> torch.Tensor:
-        # Straight-Through Gumbel-Softmax: 前向き計算は常にone-hot(ハード)だが、学習時の逆伝播は
-        # ハード化前のsoftmax分布を通じて勾配が流れる。推論時はGumbelノイズを乗せず決定的なargmaxで
-        # 選ぶ(ONNX変換後のargmax+gatherと一致させるため)。ポインタ選択・頂点座標のビン選択の
-        # 両方で使う共通ロジック
+    def _selection_weights(self, logits: torch.Tensor, soft_temperature: float | None) -> torch.Tensor:
+        # ポインタ選択・頂点座標のビン選択の両方で使う共通ロジック。選択の重み(one-hotまたは確率)を返す。
+        # soft_temperatureがNoneなら、one-hot(ハード)。学習時はStraight-Through Gumbel-Softmax
+        # (前向き計算はone-hot、逆伝播はハード化前のsoftmax分布を通じて勾配が流れる)、推論時は
+        # Gumbelノイズを乗せず決定的なargmax(ONNX変換後のargmax+gatherと一致させるため)。
+        # 指定があれば、one-hotの代わりにsoftmax(logits / soft_temperature)の確率をそのまま返す
+        if soft_temperature is not None:
+            return torch.softmax(logits / soft_temperature, dim=-1)
         if self.training:
             return F.gumbel_softmax(logits, tau=self.gumbel_temperature, hard=True, dim=-1)
         return F.one_hot(logits.argmax(dim=-1), num_classes=logits.shape[-1]).to(logits.dtype)
 
-    def _vertex_position(self, logits: torch.Tensor) -> torch.Tensor:
+    def _vertex_position(self, logits: torch.Tensor, soft_temperature: float | None) -> torch.Tensor:
         # 頂点座標をビンの分類として扱う。selection自体はSTEで微分可能だが、この関数が返す値は
         # forward側で呼び出し元がdetachする前提(頂点座標を教師する損失はlogitsを直接見るcross
         # entropyのみで、この座標値自体を経由する下流の損失には学習させない設計のため)
-        selection = self._straight_through_selection(logits)
+        selection = self._selection_weights(logits, soft_temperature)
         return (selection * self.vertex_bin_centers).sum(dim=-1)
 
     def _pointer(
-        self, query_head: nn.Linear, stroke_slots: torch.Tensor, key: torch.Tensor, vertex_features: torch.Tensor
+        self,
+        query_head: nn.Linear,
+        stroke_slots: torch.Tensor,
+        key: torch.Tensor,
+        vertex_features: torch.Tensor,
+        soft_temperature: float | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # スケール済みドット積アテンション(Transformerの標準的な手法)で、ストロークトークンから
         # 頂点トークンへの注意スコアを求める。scaleが無いと次元数が大きいほど内積の分散が増え、
@@ -140,7 +149,7 @@ class SlotAttentionDecoder(nn.Module):
         query = query_head(stroke_slots)  # (B, stroke_count, SLOT_DIM)
         scale = self.pointer_key_head.out_features**0.5
         logits = torch.bmm(query, key.transpose(1, 2)) / scale
-        selection = self._straight_through_selection(logits)
+        selection = self._selection_weights(logits, soft_temperature)
 
         # selectionをdetachすることで、points(→start_points/end_points)を経由する下流の損失からlogits
         # への逆流を断つ。「どの頂点を参照するか」を学習させたい唯一の損失(pointer_loss)は、この経路を
@@ -149,7 +158,12 @@ class SlotAttentionDecoder(nn.Module):
         points = torch.bmm(selection.detach(), vertex_features)
         return logits, points
 
-    def forward(self, z: torch.Tensor, detach_slots: bool = False) -> DecoderOutput:
+    def forward(
+        self, z: torch.Tensor, detach_slots: bool = False, soft_temperature: float | None = None
+    ) -> DecoderOutput:
+        # soft_temperature: 指定すると、ポインタ選択・頂点座標のビン選択が、argmaxではなく確率加重平均になる
+        # (温度が小さいほどargmaxに近づく)。zを動かしたときの出力が連続になる。生成時にだけ指定し、
+        # 学習・validationでは指定しない(validation lossの意味が変わるため)
         context = self.z_to_context(z).unsqueeze(1)  # (B, 1, SLOT_DIM)
         # slot_queries/type_embedding: (1, token_count, SLOT_DIM) + context: (B, 1, SLOT_DIM) はbroadcastで
         # (B, token_count, SLOT_DIM)になる(バッチ方向の明示的なexpandは不要)
@@ -172,7 +186,11 @@ class SlotAttentionDecoder(nn.Module):
         # angle_naturalness_loss等、この値を経由する全ての下流損失からの逆流を断つ。ポインタ機構の
         # selection.detach()と同じ設計思想(頂点位置の学習は自身の分類損失だけに委ねる)
         vertex_features = torch.stack(
-            [self._vertex_position(vertex_x_logits), self._vertex_position(vertex_y_logits)], dim=-1
+            [
+                self._vertex_position(vertex_x_logits, soft_temperature),
+                self._vertex_position(vertex_y_logits, soft_temperature),
+            ],
+            dim=-1,
         ).detach()
         vertex_existence_logits = self.vertex_existence_head(vertex_slots).squeeze(-1)
         stroke_offsets = self.stroke_offset_head(stroke_slots)
@@ -181,10 +199,10 @@ class SlotAttentionDecoder(nn.Module):
         # 始点・終点で同じkey(頂点トークン)投影を共有する。頂点トークン自体はどちらのポインタから見ても同じであるため
         pointer_key = self.pointer_key_head(vertex_slots)
         start_logits, start_points = self._pointer(
-            self.pointer_start_query_head, stroke_slots, pointer_key, vertex_features
+            self.pointer_start_query_head, stroke_slots, pointer_key, vertex_features, soft_temperature
         )
         end_logits, end_points = self._pointer(
-            self.pointer_end_query_head, stroke_slots, pointer_key, vertex_features
+            self.pointer_end_query_head, stroke_slots, pointer_key, vertex_features, soft_temperature
         )
 
         return DecoderOutput(
@@ -232,8 +250,10 @@ class VAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + std * eps
 
-    def decode(self, z: torch.Tensor, detach_slots: bool = False) -> DecoderOutput:
-        return self.decoder(z, detach_slots=detach_slots)
+    def decode(
+        self, z: torch.Tensor, detach_slots: bool = False, soft_temperature: float | None = None
+    ) -> DecoderOutput:
+        return self.decoder(z, detach_slots=detach_slots, soft_temperature=soft_temperature)
 
     def forward(self, x: torch.Tensor) -> tuple[DecoderOutput, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
