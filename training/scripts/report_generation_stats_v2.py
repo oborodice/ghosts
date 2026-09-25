@@ -19,7 +19,7 @@ from vae_eval_common import (
     SEGMENTS_PER_CURVE,
     existence_mask_from_logits,
 )
-from vae_classifier_dataset_v2 import VIEWBOX_SIZE
+from vae_classifier_dataset_v2 import NEAREST_REAL_FILTER_THRESHOLD, VIEWBOX_SIZE
 from vae_eval_common_v2 import (
     attract_to_latent_prior,
     duplicate_slot_pairs,
@@ -224,7 +224,7 @@ def _stroke_count(existence: np.ndarray) -> float:
 
 def _canvas_occupancy(vertex_positions: np.ndarray, vertex_existence: np.ndarray) -> float:
     # 実在頂点の外接矩形が、キャンバス全体(KanjiVGのviewBox、VIEWBOX_SIZE四方)に対してどの程度の
-    # 面積を占めるか(12-BQで定義・測定した指標)。頂点が1個以下の字は外接矩形の面積が0になり
+    # 面積を占めるか。頂点が1個以下の字は外接矩形の面積が0になり
     # 占有率の意味を持たないため除外する(_stroke_lengthのcount<2除外と同じ考え方)
     mask = vertex_existence.astype(bool)
     ratios = []
@@ -331,8 +331,8 @@ def _print_vertex_reconstruction_error(
     vertex_mean: torch.Tensor,
     vertex_std: torch.Tensor,
 ) -> None:
-    # 実スケールでの頂点再構成誤差(step13の申し送り・12-BOのH5で繰り返し参照される値)。
-    # 正解が存在しない合成z側(generated)には適用できないため、reconstruction専用の別枠にする
+    # 実スケールでの頂点再構成誤差。正解が存在しない合成z側(generated)には適用できないため、
+    # reconstruction専用の別枠にする
     distances = vertex_distance_real(vertices, existence, vertices_recon, vertex_mean, vertex_std)
     print("--- reconstruction (encode -> decode(mu)): vertex accuracy ---")
     print(f"vertex reconstruction error (real-scale) mean = {distances.mean():.4f}")
@@ -359,6 +359,23 @@ def _duplicate_pair_real_distances(
         real_distance = np.linalg.norm(real_positions[rows] - real_positions[cols], axis=-1)
         distances.extend(real_distance.tolist())
     return np.array(distances)
+
+
+def _print_mixing_diagnostics(z: torch.Tensor, weights: torch.Tensor, mu_real: torch.Tensor) -> None:
+    # 合成z領域に新しい損失を試す際、目的の指標(isolated_stroke_rate等)だけでなくこの2指標も
+    # 必ず確認する。損失が設計上encoderに直接勾配を流さなくても、decoderの適応を介した間接的な
+    # 結合学習でencoderの表現(実在字の潜在空間上の配置)自体が変わりうることが実測で確認されており、
+    # 目的の指標の改善が「decoderが混ぜ合わせをうまく扱えるようになった」のではなく「encoderが
+    # 実在字を詰め込んだことの副産物」である可能性を、この2指標で切り分ける。定義は
+    # vae_classifier_dataset_v2.pyのnear_dup_rate判定と揃える
+    distances = torch.cdist(z, mu_real)
+    nearest = distances.min(dim=1).values
+    near_dup_rate = (nearest < NEAREST_REAL_FILTER_THRESHOLD).float().mean().item() * 100
+    effective_k = 1.0 / (weights**2).sum(dim=1)
+    print("--- generated: mixing diagnostics (near_dup_rate / effective_k) ---")
+    print(f"near_dup_rate = {near_dup_rate:.2f}%")
+    print(f"effective_k mean = {effective_k.mean():.2f}, median = {effective_k.median():.2f}")
+    print()
 
 
 def _print_duplicate_slot_check(
@@ -425,10 +442,11 @@ def main() -> None:
     torch.manual_seed(SEED)
     z_raw = torch.randn(SAMPLE_COUNT, checkpoint.latent_dim, device=device)
     with torch.no_grad():
-        z, _ = attract_to_latent_prior(z_raw, mu_real)
+        z, weights = attract_to_latent_prior(z_raw, mu_real)
         decoder_output = decode_in_chunks(checkpoint.model, z)
 
     _evaluate_and_report("generated (current production checkpoint)", checkpoint, decoder_output, angle_gmm)
+    _print_mixing_diagnostics(z, weights, mu_real)
 
     _print_duplicate_slot_check(
         decoder_output.vertex_features, decoder_output.vertex_existence_logits,

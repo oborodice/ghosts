@@ -6,8 +6,7 @@ from vae_checkpoint import load_checkpoint
 from vae_eval_common import attract_to_latent_prior, decode_to_curves, draw_curves, encode, load_train_data
 from vae_model import select_device
 
-GRID_ROWS, GRID_COLS = 5, 6  # 1行だけだと個々のサンプルが小さく、崩れ方の共通パターンに気づきにくいため
-# グリッドにする(フェーズ8で交差・合流の悪化に気づいたのも、この形式で目視したことがきっかけ)
+GRID_ROWS, GRID_COLS = 5, 6  # 1行だけだと個々のサンプルが小さく、崩れ方の共通パターンに気づきにくいためグリッドにする
 SAMPLE_COUNT = GRID_ROWS * GRID_COLS
 
 

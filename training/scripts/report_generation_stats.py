@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # 生成結果の各軸(ストローク数・長さ・曲がり具合・面積・軸方向率・孤立率・交差・3本以上合流・
 # 同方向ストロークの束)を、実データと揃えた方法で数値化する診断ツール。VAEの学習・推論(生成)には
-# 一切組み込まれない、独立した事後診断用のスクリプト。フェーズ7・8を通してこの内容を都度スクラッチで
-# 書き直していたため、繰り返し使う定型のレポートとして1本化した
+# 一切組み込まれない、独立した事後診断用のスクリプト
 import numpy as np
 import torch
 
@@ -29,7 +28,6 @@ BUNDLED_ANGLE_THRESHOLD_DEG = 15.0  # vae_eval_common.AXIS_TOLERANCE_DEGと同�
 
 
 def _bbox_area(strokes: np.ndarray, existence: np.ndarray) -> np.ndarray:
-    # gan_small_scale_prototype.py(フェーズ7)以来の慣例に合わせ、端点ではなくストローク中点でbboxを取る
     midpoints = stroke_endpoints_array(strokes).mean(axis=-2)
     n = strokes.shape[0]
     areas = np.zeros(n)
