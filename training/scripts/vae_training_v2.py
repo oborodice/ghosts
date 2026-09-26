@@ -74,7 +74,7 @@ def _compute_beta(epoch: int, beta: float, kl_annealing_epochs: int) -> float:
 
 def _encode_train_mu_pool(model: VAE, datasets: Datasets, shape: ModelShape, device: torch.device) -> torch.Tensor:
     # 訓練データ全体を一度にエンコードし、合成z側の損失が引き寄せ先として使うmuの候補プールを作る。
-    # 本番の生成(vae_eval_common.attract_to_latent_prior)が訓練データ全体を候補にするのと揃えるため。
+    # 本番の生成(vae_eval_common_v2.LatentSampler)が訓練データ全体を引き寄せ先にするのと揃えるため。
     # 毎ステップ全データをエンコードするコストを避けるため、エポック単位(train呼び出し元で1回)で
     # キャッシュして使い回す近似にする(エポック内でのmuの変化は小さいと想定)。ここで計算した値は
     # 呼び出し元に戻さず引き寄せ先としてのみ使うため勾配は不要

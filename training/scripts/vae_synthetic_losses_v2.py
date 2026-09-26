@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from vae_crossing_geometry_v2 import folded_crossing_per_sample_total
 from vae_eval_common import EXISTENCE_THRESHOLD
-from vae_eval_common_v2 import KERNEL_BANDWIDTH, attract_to_pool
+from vae_generation_v2 import KERNEL_BANDWIDTH, attract_to_pool
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import VAE, DecoderOutput
 
@@ -186,7 +186,7 @@ def compute_synthetic_loss(
     # model自体を使って混ぜ合わせzをdecodeする必要があり、vae_losses_v2.compute_lossが受け取る
     # decoder_output(再構成側のdecode結果)だけでは完結しないため別枠にしている。mu_poolは訓練データ
     # 全体のmu(呼び出し元でエポック単位にキャッシュ・detach済み)で、本番の生成が引き寄せ先として
-    # 使うattract_to_latent_priorの候補プールと同じもの。muはこのバッチの実データのmuで、合成zを
+    # 使うLatentSamplerの候補プールと同じもの。muはこのバッチの実データのmuで、合成zを
     # 何件作るか(z_rawの件数)を揃えるためだけに使う。
     # lossesは重み乗算前の生の値。個々の損失を追加するたびに(a)このdictへの1行(b)重みが1.0以外
     # ならweightsへの1行、の2箇所を触るだけで済む(vae_losses_v2.compute_lossと同じ設計)。

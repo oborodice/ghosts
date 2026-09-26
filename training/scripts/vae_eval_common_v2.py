@@ -12,35 +12,8 @@ from vae_model_v2 import VAE, DecoderOutput, flatten_input
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
 DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ未満なら、デコーダが同じ頂点を複数スロットに重複して割り当てているとみなす閾値
 
-# 生成時にzを実データへ引き寄せるカーネル幅。次元数が多いほど同じbandwidthでもsoftmax重みが均一化する
-# (次元の呪い)ため、LATENT_DIMを変える場合は再較正が必要。1.5はLATENT_DIM=48(vae_model_v2.pyの
-# 既定値)向けに較正された値
-KERNEL_BANDWIDTH = 1.5
-
-# 生成時のデコードで、ポインタ選択・頂点座標のビン選択を確率加重平均にするsoftmaxの温度(model.decode
-# のsoft_temperature)。argmaxでは、zをわずかに動かしただけで選択が切り替わり、字が飛ぶ。
-# 小さいほどargmaxに近づき、ジャンプが増える。1.0は、試した温度の中でジャンプ率が最も低かった値を暫定採用
-# したもので、正式な調整は今後別途行う
-GENERATION_SOFT_TEMPERATURE = 1.0
-
 DECODE_CHUNK_SIZE = 500  # 実データ全件(9735件)を1回のforwardでdecodeするとMPSでメモリ不足に
 # なりやすい(実測: 落ちることがある)ため、この件数ずつに分けてdecodeし結果を連結する
-
-
-def attract_to_pool(z_raw: torch.Tensor, pool: torch.Tensor, bandwidth: float) -> tuple[torch.Tensor, torch.Tensor]:
-    # Nadaraya-Watson推定量(重み付き平均)でz_rawをpoolへ引き寄せる。学習時の合成z構築・生成時の
-    # 両方がこの関数を経由することで、2つの実装が食い違う(過去に実際に起きた)ことを構造的に防ぐ。
-    # 重み(どのpool要素がどれだけ引き寄せに寄与したか)も返す。呼び出し元の大半は結果だけを使う
-    # (`z_synthetic, _ = attract_to_pool(...)`)が、寄与元の実在字を特定したい診断用途では
-    # この重みをそのまま使える
-    dist_sq = torch.cdist(z_raw, pool) ** 2
-    weights = torch.softmax(-dist_sq / (2 * bandwidth * bandwidth), dim=1)
-    return weights @ pool, weights
-
-
-@torch.no_grad()
-def attract_to_latent_prior(z_raw: torch.Tensor, mu_real: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    return attract_to_pool(z_raw, mu_real, KERNEL_BANDWIDTH)
 
 
 class Batch(NamedTuple):
@@ -168,3 +141,4 @@ def count_duplicate_slots(vertex_features: torch.Tensor, existence_mask: torch.T
         pair_rows, _ = duplicate_slot_pairs(positions)
         counts.append(len(pair_rows))
     return np.array(counts)
+
