@@ -73,11 +73,11 @@ $ uv run scripts/sweep_vae_v2.py
 # 典型的な4字に加え、頂点の再構成誤差が最悪だった字も表示する
 $ uv run scripts/visualize_reconstruction_v2.py
 
-# 混ぜ合わせ生成(事前分布サンプル+attract_to_latent_prior)時の孤立率・3本以上合流・交差・角度の
+# 生成(事前分布サンプル+LatentSampler)時の孤立率・3本以上合流・交差・角度の
 # 自然さ・offset分散・ストローク長・ストローク数・キャンバス占有率を、実データ・reconstructionと
 # 比較できる一貫した方法で数値化する。あわせて、reconstructionの頂点再構成誤差(実スケール)、
 # 頂点の重複スロットが3本以上合流のカウントを狂わせていないか、ポインタの構造的な破綻
-# (自己ループ・幽霊参照)の頻度、混ぜ合わせ地点(z_blend)のnear_dup_rate(実在字とほぼ重複している
+# (自己ループ・幽霊参照)の頻度、生成したzのnear_dup_rate(実在字とほぼ重複している
 # 割合)・effective_k(実質何字を混ぜて作られているか)も確認する。後者2つは、合成z領域に新しい
 # 損失を試す際、目的の指標の改善がencoder表現の崩壊の副産物でないかを切り分けるための診断。
 # `--checkpoint`で評価対象のVAEチェックポイントを指定できる(省略時は既定のチェックポイント)。生成分は、
@@ -88,6 +88,11 @@ $ uv run scripts/report_generation_stats_v2.py
 # (信頼区間つき)、zの移動距離あたりのジャンプ回数、ストロークの出現・消失の頻度を出す。
 # 生成時のソフトデコード(`GENERATION_SOFT_TEMPERATURE`)で、ノイズの周期30秒・60秒の2通りを測る
 $ uv run scripts/report_morph_smoothness_v2.py --checkpoint <path>
+
+# 生成した字の、ストローク数の分布・字の大きさ・実在字との近さ・構造の破綻(自己ループなど)・なめらかさを、
+# 実在字と比べて数値化する(ストローク数の分布・字の大きさなどの実在字とのWasserstein距離、実在字までの最寄り距離、
+# 自己ループなど、1字ごとの合格率(参考)、軌跡の上でのジャンプ率・ストローク数の変化)
+$ uv run scripts/report_generation_diversity_v2.py --checkpoint <path>
 
 # simplex noiseで動かした潜在変数から生成した字の変化を、アニメーションGIFとして書き出す目視確認用のツール。
 # 上の診断と同じ軌跡・デコード(周期30秒)で作る

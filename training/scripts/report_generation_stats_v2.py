@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# 混ぜ合わせ生成(attract_to_latent_prior)時の孤立率・3本以上合流・交差を、過去の実データ・
-# 生成結果の測定値と比較できる方法で数値化する診断ツール。VAEの学習・推論(生成)には
-# 一切組み込まれない、独立した事後診断用のスクリプト。あわせて、重複スロットが3本以上合流の
-# カウントを狂わせていないか、およびポインタの構造的な破綻(自己ループ・幽霊参照)の頻度も確認する
+# 実データ・再構成(encode→decode(mu))・生成(LatentSampler、ソフトデコード)の3つを、
+# 同じ方法で測って並べる診断ツール。孤立率・3本以上合流・交差・角度の自然さ・offsetのばらつき・
+# ストローク長・ストローク数・キャンバス占有率と、ポインタの構造的な破綻(自己ループ・幽霊参照)を測る。
+# あわせて、生成側の混ぜ合わせの診断(near_dup_rate・effective_k)と、重複スロットが3本以上合流の
+# カウントを狂わせていないかを確認する。VAEの学習・推論(生成)には一切組み込まれない、独立した事後診断用のスクリプト
 import argparse
 from pathlib import Path
 
@@ -21,8 +22,6 @@ from vae_eval_common import (
 )
 from vae_classifier_dataset_v2 import NEAREST_REAL_FILTER_THRESHOLD, VIEWBOX_SIZE
 from vae_eval_common_v2 import (
-    GENERATION_SOFT_TEMPERATURE,
-    attract_to_latent_prior,
     decode_in_chunks,
     duplicate_slot_pairs,
     encode_batch,
@@ -32,6 +31,7 @@ from vae_eval_common_v2 import (
     true_strokes_real,
     vertex_distance_real,
 )
+from vae_generation_v2 import GENERATION_SOFT_TEMPERATURE, LatentSampler
 from vae_losses import AngleGMM, angle_log_density, build_angle_gmm
 from vae_losses_v2 import MIN_DIRECTION_NORM
 from vae_model_v2 import CHECKPOINT_PATH, DecoderOutput, select_device
@@ -434,7 +434,7 @@ def main() -> None:
     torch.manual_seed(SEED)
     z_raw = torch.randn(SAMPLE_COUNT, checkpoint.latent_dim, device=device)
     with torch.no_grad():
-        z, weights = attract_to_latent_prior(z_raw, mu_real)
+        z, weights = LatentSampler(mu_real).sample(z_raw)
         decoder_output = decode_in_chunks(checkpoint.model, z, soft_temperature=GENERATION_SOFT_TEMPERATURE)
 
     _evaluate_and_report("generated", checkpoint, decoder_output, angle_gmm)

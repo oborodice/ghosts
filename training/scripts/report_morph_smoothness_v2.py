@@ -18,13 +18,12 @@ from vae_checkpoint_v2 import Checkpoint, load_checkpoint
 from vae_data_v2 import prepare_datasets
 from vae_eval_common import existence_mask_from_logits
 from vae_eval_common_v2 import (
-    GENERATION_SOFT_TEMPERATURE,
-    attract_to_latent_prior,
     decode_in_chunks,
     encode_batch,
     load_batch,
     reconstructed_strokes_real,
 )
+from vae_generation_v2 import GENERATION_SOFT_TEMPERATURE, LatentSampler
 from vae_model_v2 import CHECKPOINT_PATH
 
 FPS = 30.0
@@ -34,7 +33,7 @@ TRAJECTORY_COUNT = 64
 PERIODS_SECONDS = (30.0, 60.0)  # フロントエンドのSPEED(=1/周期)に対応する周期の秒数。大きいほどゆっくり動く
 SEED = 0
 JUMP_THRESHOLD = 10.0  # 連続する2フレームの間で、端点がこれ以上(キャンバスは109単位)動いたらジャンプとみなす
-ATTRACT_CHUNK_SIZE = 3000  # 全フレームを1回でattractすると、実在字との距離行列が大きくなりすぎるため分割する
+SAMPLER_CHUNK_SIZE = 3000  # 全フレームを1回でLatentSamplerに通すと、実在字との距離行列が大きくなりすぎるため分割する
 BOOTSTRAP_ROUNDS = 2000
 BOOTSTRAP_SEED = 0  # 信頼区間を毎回同じ値にするため固定する
 CONFIDENCE_PERCENTILES = (2.5, 97.5)  # 95%信頼区間
@@ -71,15 +70,15 @@ def generate_walks(
     return walks
 
 
-def prepare_latents(walks: np.ndarray, mu_real: torch.Tensor) -> torch.Tensor:
-    # walks: (trajectory_count, frame_count, latent_dim)を、attract_to_latent_priorに通す。
+def prepare_latents(walks: np.ndarray, sampler: LatentSampler) -> torch.Tensor:
+    # walks: (trajectory_count, frame_count, latent_dim)を、生成時と同じLatentSamplerに通す。
     # 返り値は、全軌跡・全フレームを連結した(frames, latent_dim)
     z = torch.from_numpy(walks.reshape(-1, walks.shape[-1]))
     with torch.no_grad():
         return torch.cat(
             [
-                attract_to_latent_prior(z[i : i + ATTRACT_CHUNK_SIZE], mu_real)[0]
-                for i in range(0, len(z), ATTRACT_CHUNK_SIZE)
+                sampler.sample(z[i : i + SAMPLER_CHUNK_SIZE])[0]
+                for i in range(0, len(z), SAMPLER_CHUNK_SIZE)
             ]
         )
 
@@ -152,10 +151,11 @@ def main() -> None:
     checkpoint = load_checkpoint(device, checkpoint_path=args.checkpoint)
     with torch.no_grad():
         mu_real, _ = encode_batch(checkpoint, load_batch(prepare_datasets(), "train", device))
+    sampler = LatentSampler(mu_real)
 
     for period in PERIODS_SECONDS:
         walks = generate_walks(TRAJECTORY_COUNT, FRAMES_PER_TRAJECTORY, checkpoint.latent_dim, period, SEED)
-        z = prepare_latents(walks, mu_real)
+        z = prepare_latents(walks, sampler)
         print(f"=== period {period:g}s ({TRAJECTORY_COUNT} trajectories x {FRAMES_PER_TRAJECTORY} frames, {FPS:g} fps)")
         print_smoothness_metrics(decode_frames(checkpoint, z, GENERATION_SOFT_TEMPERATURE), z, TRAJECTORY_COUNT)
 

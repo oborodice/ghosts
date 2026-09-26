@@ -13,7 +13,8 @@ from vae_checkpoint_v2 import load_checkpoint
 from vae_classifier_dataset_v2 import VIEWBOX_SIZE
 from vae_data_v2 import prepare_datasets
 from vae_eval_common import SEGMENTS_PER_CURVE, bezier_polyline
-from vae_eval_common_v2 import GENERATION_SOFT_TEMPERATURE, encode_batch, load_batch, stroke_curves
+from vae_eval_common_v2 import encode_batch, load_batch, stroke_curves
+from vae_generation_v2 import GENERATION_SOFT_TEMPERATURE, LatentSampler
 from vae_model_v2 import CHECKPOINT_PATH
 
 PERIOD_SECONDS = 30.0  # フロントエンドのSPEED(=1/周期)に対応する周期の秒数。大きいほどゆっくり動く
@@ -65,7 +66,7 @@ def main() -> None:
 
     frame_count = int(SECONDS * FPS)
     walks = generate_walks(1, frame_count, checkpoint.latent_dim, PERIOD_SECONDS, SEED)
-    frames = decode_frames(checkpoint, prepare_latents(walks, mu_real), GENERATION_SOFT_TEMPERATURE)
+    frames = decode_frames(checkpoint, prepare_latents(walks, LatentSampler(mu_real)), GENERATION_SOFT_TEMPERATURE)
 
     images = [_render_frame(frames, frame_index) for frame_index in range(frame_count)]
     args.output.parent.mkdir(parents=True, exist_ok=True)

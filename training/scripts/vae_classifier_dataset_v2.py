@@ -8,12 +8,11 @@ from PIL import Image, ImageDraw, ImageFilter
 from vae_checkpoint_v2 import Checkpoint
 from vae_eval_common import SEGMENTS_PER_CURVE, bezier_polyline, existence_mask_from_logits
 from vae_eval_common_v2 import (
-    GENERATION_SOFT_TEMPERATURE,
     RealScaleStrokes,
-    attract_to_latent_prior,
     reconstructed_strokes_real,
     stroke_curves,
 )
+from vae_generation_v2 import GENERATION_SOFT_TEMPERATURE, LatentSampler
 
 NEAREST_REAL_FILTER_THRESHOLD = 1.0  # これより実在字に近い生成サンプルは、ラベルの矛盾(ほぼ同じ入力なのに本物・偽物の両方に現れる)を避けるため除外する
 VIEWBOX_SIZE = 109.0  # KanjiVGのSVGのviewBoxサイズ(データの座標系そのもの。training/data/kanjivg/*.svg参照)
@@ -63,7 +62,7 @@ def _sample_candidates(
     oversample = int(count * 1.2) + 50
     z_raw = torch.randn(oversample, checkpoint.latent_dim, device=mu_real.device)
     with torch.no_grad():
-        z, _ = attract_to_latent_prior(z_raw, mu_real)
+        z, _ = LatentSampler(mu_real).sample(z_raw)
         nearest_dist = torch.cdist(z, mu_real).min(dim=1).values
         decoder_output = checkpoint.model.decode(z, soft_temperature=GENERATION_SOFT_TEMPERATURE)
     strokes = reconstructed_strokes_real(checkpoint, decoder_output)
