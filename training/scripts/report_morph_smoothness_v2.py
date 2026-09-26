@@ -14,13 +14,13 @@ import numpy as np
 import torch
 from opensimplex import OpenSimplex
 
-from report_generation_stats_v2 import decode_in_chunks
 from vae_checkpoint_v2 import Checkpoint, load_checkpoint
 from vae_data_v2 import prepare_datasets
 from vae_eval_common import existence_mask_from_logits
 from vae_eval_common_v2 import (
     GENERATION_SOFT_TEMPERATURE,
     attract_to_latent_prior,
+    decode_in_chunks,
     encode_batch,
     load_batch,
     reconstructed_strokes_real,
@@ -119,23 +119,25 @@ def _bootstrap_confidence_interval(per_trajectory_values: np.ndarray) -> tuple[f
     return float(low), float(high)
 
 
-def _print_metrics(frames: DecodedFrames, z: torch.Tensor) -> None:
-    displacement = _slot_displacement(frames, TRAJECTORY_COUNT)
-    z_path = z.reshape(TRAJECTORY_COUNT, FRAMES_PER_TRAJECTORY, -1)
+def print_smoothness_metrics(frames: DecodedFrames, z: torch.Tensor, trajectory_count: int) -> None:
+    # frames・zは、trajectory_count本の同じ長さの軌跡を、フレームの軸で連結したもの
+    frames_per_trajectory = len(z) // trajectory_count
+    displacement = _slot_displacement(frames, trajectory_count)
+    z_path = z.reshape(trajectory_count, frames_per_trajectory, -1)
     z_step_lengths = (z_path[:, 1:] - z_path[:, :-1]).norm(dim=2).numpy()
     is_jump = displacement > JUMP_THRESHOLD
     jump_rate_per_trajectory = is_jump.mean(axis=1)
     low, high = _bootstrap_confidence_interval(jump_rate_per_trajectory)
-    existence = _by_trajectory(frames.existence, TRAJECTORY_COUNT)
+    existence = _by_trajectory(frames.existence, trajectory_count)
     flip_count = (existence[:, 1:] != existence[:, :-1]).sum()
-    duration = (FRAMES_PER_TRAJECTORY - 1) / FPS
+    duration = (frames_per_trajectory - 1) / FPS
 
     print(
         f"  frame transitions with a slot jump (> {JUMP_THRESHOLD:g} units): {100 * jump_rate_per_trajectory.mean():.2f}%"
         f" (95% CI {100 * low:.2f}-{100 * high:.2f})"
     )
     print(f"  jumps per unit of z path length (speed-independent): {is_jump.sum() / z_step_lengths.sum():.2f}")
-    print(f"  stroke pop-in/out: {flip_count / TRAJECTORY_COUNT / duration:.2f} flips per second per trajectory")
+    print(f"  stroke pop-in/out: {flip_count / trajectory_count / duration:.2f} flips per second per trajectory")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -155,7 +157,7 @@ def main() -> None:
         walks = generate_walks(TRAJECTORY_COUNT, FRAMES_PER_TRAJECTORY, checkpoint.latent_dim, period, SEED)
         z = prepare_latents(walks, mu_real)
         print(f"=== period {period:g}s ({TRAJECTORY_COUNT} trajectories x {FRAMES_PER_TRAJECTORY} frames, {FPS:g} fps)")
-        _print_metrics(decode_frames(checkpoint, z, GENERATION_SOFT_TEMPERATURE), z)
+        print_smoothness_metrics(decode_frames(checkpoint, z, GENERATION_SOFT_TEMPERATURE), z, TRAJECTORY_COUNT)
 
 
 if __name__ == "__main__":

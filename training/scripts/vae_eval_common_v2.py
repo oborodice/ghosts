@@ -7,7 +7,7 @@ import torch
 
 from vae_checkpoint_v2 import Checkpoint
 from vae_data_v2 import Datasets
-from vae_model_v2 import DecoderOutput, flatten_input
+from vae_model_v2 import VAE, DecoderOutput, flatten_input
 
 ACTIVE_UNIT_THRESHOLD = 0.01  # 潜在次元ごとのKLがこれを下回る場合、その次元は「死んでいる」とみなす
 DUPLICATE_POSITION_THRESHOLD = 0.15  # 標準化後の座標間距離がこれ未満なら、デコーダが同じ頂点を複数スロットに重複して割り当てているとみなす閾値
@@ -22,6 +22,9 @@ KERNEL_BANDWIDTH = 1.5
 # 小さいほどargmaxに近づき、ジャンプが増える。1.0は、試した温度の中でジャンプ率が最も低かった値を暫定採用
 # したもので、正式な調整は今後別途行う
 GENERATION_SOFT_TEMPERATURE = 1.0
+
+DECODE_CHUNK_SIZE = 500  # 実データ全件(9735件)を1回のforwardでdecodeするとMPSでメモリ不足に
+# なりやすい(実測: 落ちることがある)ため、この件数ずつに分けてdecodeし結果を連結する
 
 
 def attract_to_pool(z_raw: torch.Tensor, pool: torch.Tensor, bandwidth: float) -> tuple[torch.Tensor, torch.Tensor]:
@@ -61,6 +64,21 @@ def encode_batch(checkpoint: Checkpoint, batch: Batch) -> tuple[torch.Tensor, to
         batch.stroke_offsets, batch.stroke_existence, checkpoint.shape,
     )
     return checkpoint.model.encode(x)
+
+
+def decode_in_chunks(
+    model: VAE,
+    z: torch.Tensor,
+    chunk_size: int = DECODE_CHUNK_SIZE,
+    soft_temperature: float | None = None,
+) -> DecoderOutput:
+    # model.decode(z)を1回のforwardで全件処理すると、件数が大きい場合(実データ全件9735件等)に
+    # MPSでメモリ不足になりやすい。数値結果は分割しても変わらないため、chunk_size件ずつdecodeして
+    # DecoderOutputの各フィールドをバッチ次元で連結する
+    chunks = [
+        model.decode(z[i : i + chunk_size], soft_temperature=soft_temperature) for i in range(0, len(z), chunk_size)
+    ]
+    return DecoderOutput(*(torch.cat(field, dim=0) for field in zip(*chunks)))
 
 
 def kl_per_dim(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:

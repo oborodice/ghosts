@@ -23,6 +23,7 @@ from vae_classifier_dataset_v2 import NEAREST_REAL_FILTER_THRESHOLD, VIEWBOX_SIZ
 from vae_eval_common_v2 import (
     GENERATION_SOFT_TEMPERATURE,
     attract_to_latent_prior,
+    decode_in_chunks,
     duplicate_slot_pairs,
     encode_batch,
     load_batch,
@@ -33,25 +34,11 @@ from vae_eval_common_v2 import (
 )
 from vae_losses import AngleGMM, angle_log_density, build_angle_gmm
 from vae_losses_v2 import MIN_DIRECTION_NORM
-from vae_model_v2 import CHECKPOINT_PATH, DecoderOutput, VAE, select_device
+from vae_model_v2 import CHECKPOINT_PATH, DecoderOutput, select_device
 from vae_synthetic_losses import masked_mean_std
 
-SAMPLE_COUNT = 2000  # 過去の実データ・生成結果の測定と同じ値(歴史的な比較のため)
+SAMPLE_COUNT = 2000  # 他の生成の診断(多様性のレポートなど)と同じ点数にし、結果を直接比べられるようにする
 SEED = 0
-DECODE_CHUNK_SIZE = 500  # 実データ全件(9735件)を1回のforwardでdecodeするとMPSでメモリ不足に
-# なりやすい(実測: 落ちることがある)ため、この件数ずつに分けてdecodeし結果を連結する
-
-
-def decode_in_chunks(
-    model: VAE, z: torch.Tensor, chunk_size: int = DECODE_CHUNK_SIZE, soft_temperature: float | None = None
-) -> DecoderOutput:
-    # model.decode(z)を1回のforwardで全件処理すると、件数が大きい場合(実データ全件9735件等)に
-    # MPSでメモリ不足になりやすい。数値結果は分割しても変わらないため、chunk_size件ずつdecodeして
-    # DecoderOutputの各フィールドをバッチ次元で連結する
-    chunks = [
-        model.decode(z[i : i + chunk_size], soft_temperature=soft_temperature) for i in range(0, len(z), chunk_size)
-    ]
-    return DecoderOutput(*(torch.cat(field, dim=0) for field in zip(*chunks)))
 
 
 def isolated_stroke_counts(
@@ -450,7 +437,7 @@ def main() -> None:
         z, weights = attract_to_latent_prior(z_raw, mu_real)
         decoder_output = decode_in_chunks(checkpoint.model, z, soft_temperature=GENERATION_SOFT_TEMPERATURE)
 
-    _evaluate_and_report("generated (current production checkpoint)", checkpoint, decoder_output, angle_gmm)
+    _evaluate_and_report("generated", checkpoint, decoder_output, angle_gmm)
     _print_mixing_diagnostics(z, weights, mu_real)
 
     _print_duplicate_slot_check(

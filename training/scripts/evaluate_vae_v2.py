@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 # 頂点+ストローク全体の再構成品質のチェック(損失の内訳・潜在次元ごとのKL・重みの健全性・誤差分布・
-# 丸暗記化の確認・頂点の重複スロットの検出)を行う。交差数・3本以上合流の集計はまだ交差抑制損失を
-# 追加していないため対象外
+# 丸暗記化の確認・頂点の重複スロットの検出)を行う。生成した字の交差数・3本以上合流などの集計は、
+# report_generation_stats_v2.pyが担う
+import argparse
+from pathlib import Path
+
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from vae_checkpoint_v2 import load_checkpoint
 from vae_data_v2 import prepare_datasets
@@ -18,58 +20,44 @@ from vae_eval_common_v2 import (
     load_batch,
     vertex_distance_real,
 )
-from vae_losses_v2 import pointer_loss
-from vae_model_v2 import VAE, DecoderOutput, select_device
+from vae_losses import build_angle_gmm
+from vae_losses_v2 import LossComponents, compute_loss
+from vae_model_v2 import CHECKPOINT_PATH, VAE, DecoderOutput, select_device
+from vae_training_v2 import BETA
 
 WORST_SAMPLE_COUNT = 5
+TOP_KL_DIM_COUNT = 5
 
 
-def _print_loss_breakdown(batch: Batch, decoder_output: DecoderOutput, mu: torch.Tensor, logvar: torch.Tensor) -> None:
+def _print_loss_breakdown(losses: LossComponents) -> None:
     print("== 1. Loss breakdown ==")
-    vertex_mask = batch.vertex_existence.unsqueeze(-1)
-    vertex_loss = (((decoder_output.vertex_features - batch.vertices) ** 2) * vertex_mask).sum(dim=(1, 2)).mean()
-    vertex_existence_loss = (
-        F.binary_cross_entropy_with_logits(
-            decoder_output.vertex_existence_logits, batch.vertex_existence, reduction="none"
-        )
-        .sum(dim=1)
-        .mean()
+    # 学習時の合計には、混ぜ合わせたzをdecodeして計算する損失(自己ループ・交差など)も加わるが、
+    # 学習中の潜在のプールやストローク数のプールが要るため、ここでは再構成側の損失だけを示す。
+    # 重みを掛けた合計(total)は、学習時のβに依存し、学習ログの検証損失とも一致しないため出さない
+    print(
+        "(reconstruction-side losses only, before weighting;"
+        " the synthetic-z losses added during training are not included)"
     )
-    start_pointer_loss = pointer_loss(
-        decoder_output.start_pointer_logits, batch.stroke_vertex_indices[..., 0], batch.stroke_existence
-    )
-    end_pointer_loss = pointer_loss(
-        decoder_output.end_pointer_logits, batch.stroke_vertex_indices[..., 1], batch.stroke_existence
-    )
-    stroke_offset_mask = batch.stroke_existence.unsqueeze(-1)
-    stroke_offset_loss = (
-        ((decoder_output.stroke_offsets - batch.stroke_offsets) ** 2) * stroke_offset_mask
-    ).sum(dim=(1, 2)).mean()
-    stroke_existence_loss = (
-        F.binary_cross_entropy_with_logits(
-            decoder_output.stroke_existence_logits, batch.stroke_existence, reduction="none"
-        )
-        .sum(dim=1)
-        .mean()
-    )
-    kl_divergence = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=1).mean()
-
-    print(f"vertex_loss:           {vertex_loss.item():.4f}")
-    print(f"vertex_existence_loss: {vertex_existence_loss.item():.4f}")
-    print(f"start_pointer_loss:    {start_pointer_loss.item():.4f}")
-    print(f"end_pointer_loss:      {end_pointer_loss.item():.4f}")
-    print(f"stroke_offset_loss:    {stroke_offset_loss.item():.4f}")
-    print(f"stroke_existence_loss: {stroke_existence_loss.item():.4f}")
-    print(f"kl_divergence:         {kl_divergence.item():.4f}")
+    names = [name for name in LossComponents._fields if name != "total"]
+    label_width = max(len(name) for name in names) + 2  # 名前の後ろの":"と、値との間の空白の分
+    for name in names:
+        print(f"{name + ':':<{label_width}}{getattr(losses, name).item():.4f}")
     print()
 
 
 def _print_active_units(kl_per_dim: torch.Tensor) -> None:
     print("== 2. Per-dimension KL (active units) ==")
-    for dim, kl in enumerate(kl_per_dim.tolist()):
-        print(f"  dim {dim:2d}: {kl:.4f}")
     dead_count = (kl_per_dim < ACTIVE_UNIT_THRESHOLD).sum().item()
     print(f"Dead dimensions: {dead_count} / {len(kl_per_dim)} (threshold={ACTIVE_UNIT_THRESHOLD})")
+    print(
+        f"KL per dimension: total={kl_per_dim.sum():.2f} min={kl_per_dim.min():.4f}"
+        f" median={kl_per_dim.median():.4f} max={kl_per_dim.max():.4f}"
+    )
+    # 情報が少数の次元に集まっていないかを見るため、KLの大きい次元と、その合計に占める割合を示す
+    top_kl, top_dims = kl_per_dim.topk(TOP_KL_DIM_COUNT)
+    top_dims_text = ", ".join(f"dim {dim}={kl:.3f}" for dim, kl in zip(top_dims.tolist(), top_kl.tolist()))
+    top_share = top_kl.sum() / kl_per_dim.sum()
+    print(f"Largest {TOP_KL_DIM_COUNT} dimensions ({top_share:.0%} of the total): {top_dims_text}")
     print()
 
 
@@ -85,19 +73,16 @@ def _print_weight_health(model: VAE) -> None:
     print()
 
 
-def _decode_deterministic(model: VAE, mu: torch.Tensor) -> DecoderOutput:
-    # 誤差分布・丸暗記化チェックで共通して使う決定論的デコード(ノイズのないmuから)
-    return model.decode(mu)
+def _masked_sample_mse(predicted: torch.Tensor, target: torch.Tensor, existence: torch.Tensor) -> np.ndarray:
+    # サンプルごとの、実在するスロット・特徴量の軸あたりの平均二乗誤差(スロット数による誤差の見かけ上の
+    # 増減を避けるため、和ではなく平均を取る)。predicted・target: (B, slots, features)、existence: (B, slots)
+    mask = existence.unsqueeze(-1)
+    sample_mse = ((predicted - target) ** 2 * mask).sum(dim=(1, 2)) / (mask.sum(dim=(1, 2)) * target.shape[-1])
+    return sample_mse.cpu().numpy()
 
 
 def _vertex_mse(batch: Batch, decoder_output: DecoderOutput) -> np.ndarray:
-    mask = batch.vertex_existence.unsqueeze(-1)
-    feature_dim = batch.vertices.shape[-1]
-    # 実在するスロット・座標軸あたりの平均二乗誤差(頂点数による誤差の見かけ上の増減を避けるため、和ではなく平均を取る)
-    sample_mse = ((decoder_output.vertex_features - batch.vertices) ** 2 * mask).sum(dim=(1, 2)) / (
-        mask.sum(dim=(1, 2)) * feature_dim
-    )
-    return sample_mse.cpu().numpy()
+    return _masked_sample_mse(decoder_output.vertex_features, batch.vertices, batch.vertex_existence)
 
 
 def _pointer_accuracy(logits: torch.Tensor, target_index: torch.Tensor, stroke_existence: torch.Tensor) -> np.ndarray:
@@ -125,10 +110,7 @@ def _print_error_distribution(
         decoder_output.end_pointer_logits, batch.stroke_vertex_indices[..., 1], batch.stroke_existence
     )
 
-    stroke_offset_mask = batch.stroke_existence.unsqueeze(-1)
-    stroke_offset_mse = (
-        (decoder_output.stroke_offsets - batch.stroke_offsets) ** 2 * stroke_offset_mask
-    ).sum(dim=(1, 2)) / (stroke_offset_mask.sum(dim=(1, 2)) * batch.stroke_offsets.shape[-1])
+    stroke_offset_mse = _masked_sample_mse(decoder_output.stroke_offsets, batch.stroke_offsets, batch.stroke_existence)
 
     print(f"vertex MSE (standardized scale): mean={sample_mse.mean():.4f} max={sample_mse.max():.4f}")
     print(f"vertex distance (real coordinate scale): mean={distance_real.mean():.4f} max={distance_real.max():.4f}")
@@ -187,9 +169,21 @@ def _print_duplicate_slots(decoder_output: DecoderOutput) -> None:
     print()
 
 
+def _decode_deterministic(model: VAE, mu: torch.Tensor) -> DecoderOutput:
+    # 誤差分布・丸暗記化チェックで共通して使う決定論的デコード(ノイズのないmuから)
+    return model.decode(mu)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=Path, default=CHECKPOINT_PATH, help="Path to the VAE checkpoint to evaluate")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = _parse_args()
     device = select_device()
-    checkpoint = load_checkpoint(device)
+    checkpoint = load_checkpoint(device, checkpoint_path=args.checkpoint)
     datasets = prepare_datasets()
 
     val_batch = load_batch(datasets, "val", device)
@@ -199,6 +193,14 @@ def main() -> None:
         # 損失の内訳・KLは学習時のvalidation lossと同じ経路(サンプリングzを含むforward)で再現する
         mu, logvar = encode_batch(checkpoint, val_batch)
         decoder_output = checkpoint.model.decode(checkpoint.model.reparameterize(mu, logvar))
+        # 学習と同じ損失の関数で計算する。βは、出力しない合計(total)にだけ掛かるため、
+        # このチェックポイントの学習時のβと違っても、出力する内訳の値は変わらない
+        losses = compute_loss(
+            val_batch.vertices, val_batch.vertex_existence, val_batch.stroke_vertex_indices,
+            val_batch.stroke_offsets, val_batch.stroke_existence, decoder_output, mu, logvar, BETA,
+            checkpoint.vertex_mean, checkpoint.vertex_std, checkpoint.stroke_offset_mean, checkpoint.stroke_offset_std,
+            build_angle_gmm(datasets.angle_gmm_params, device),
+        )
 
         # 誤差分布はワースト字形を実行のたびに入れ替えたくないため、ノイズのないmuから決定論的にデコードする
         val_decoder_output = _decode_deterministic(checkpoint.model, mu)
@@ -208,7 +210,7 @@ def main() -> None:
         train_decoder_output = _decode_deterministic(checkpoint.model, train_mu)
 
     kl_per_dim = compute_kl_per_dim(mu, logvar)
-    _print_loss_breakdown(val_batch, decoder_output, mu, logvar)
+    _print_loss_breakdown(losses)
     _print_active_units(kl_per_dim)
     _print_weight_health(checkpoint.model)
     _print_error_distribution(val_batch, val_decoder_output, checkpoint.vertex_mean, checkpoint.vertex_std)
