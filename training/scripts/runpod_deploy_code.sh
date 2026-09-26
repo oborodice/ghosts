@@ -21,7 +21,8 @@ usage() {
   echo "Usage: $0 <ip> <port> [--with-data] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]" >&2
   echo "  --source: send scripts/pyproject.toml/uv.lock from a directory other than training/ (e.g. a scratch copy for a parallel ablation)" >&2
   echo "  --remote-dir: deploy under a path other than ${DEFAULT_REMOTE_DIR} (e.g. to run several sweep configs on one pod" >&2
-  echo "  side by side; this workload barely uses CPU/GPU per process, so one pod has room for several). Needs --with-data" >&2
+  echo "  side by side; this workload barely uses the GPU, but each process takes about 3-4 CPU cores, so the pod's CPU" >&2
+  echo "  limit in /sys/fs/cgroup/cpu.max (not nproc) decides how many fit). Needs --with-data" >&2
   echo "  too, since each remote-dir is a self-contained copy with its own data/ (checkpoint/data paths are relative to" >&2
   echo "  the script file, not the CWD)" >&2
   echo "  --link-venv: skip 'uv sync' and symlink .venv from another already-synced remote-dir on the same pod instead" >&2

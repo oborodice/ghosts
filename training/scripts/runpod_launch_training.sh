@@ -8,7 +8,8 @@ SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
 
 usage() {
-  echo "Usage: $0 <ip> <port> [remote-resume-path] [--remote-dir <path>]" >&2
+  echo "Usage: $0 <ip> <port> [remote-resume-path] [--remote-dir <path>] [--train-args \"<args>\"]" >&2
+  echo "  --train-args: extra arguments passed to train_vae_v2.py as one quoted string (e.g. \"--max-epochs 40\")" >&2
   echo "  --remote-dir: launch a copy deployed under a path other than ${DEFAULT_REMOTE_DIR} (see" >&2
   echo "  runpod_deploy_code.sh --remote-dir, for running several sweep configs on one pod)" >&2
   exit 1
@@ -24,12 +25,18 @@ shift 2
 
 REMOTE_DIR="${DEFAULT_REMOTE_DIR}"
 RESUME_PATH=""
+TRAIN_ARGS=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --remote-dir)
       [ "$#" -ge 2 ] || usage
       REMOTE_DIR="$2"
+      shift 2
+      ;;
+    --train-args)
+      [ "$#" -ge 2 ] || usage
+      TRAIN_ARGS="$2"
       shift 2
       ;;
     *)
@@ -48,4 +55,4 @@ fi
 # --link-venvで他ディレクトリからシンボリックリンクしたvenvに対してuvがロック検証・
 # 再同期を試みる可能性を避ける)
 ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
-  "cd ${REMOTE_DIR} && nohup .venv/bin/python3 -u scripts/train_vae_v2.py ${RESUME_ARG} > train.log 2>&1 < /dev/null & disown; sleep 2; ps aux | grep train_vae_v2 | grep -v grep"
+  "cd ${REMOTE_DIR} && nohup .venv/bin/python3 -u scripts/train_vae_v2.py ${RESUME_ARG} ${TRAIN_ARGS} > train.log 2>&1 < /dev/null & disown; sleep 2; ps aux | grep train_vae_v2 | grep -v grep"

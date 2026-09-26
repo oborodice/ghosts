@@ -8,7 +8,7 @@ import torch
 from vae_data_v2 import SEED, prepare_datasets
 from vae_model_v2 import CHECKPOINT_PATH, HIDDEN_DIMS, LATENT_DIM, select_device
 from vae_resume_v2 import checkpoint_path_from_resume_state
-from vae_training_v2 import BETA, GUMBEL_TEMPERATURE, KL_ANNEALING_EPOCHS, SLOT_ATTENTION_CONFIG, train
+from vae_training_v2 import BETA, GUMBEL_TEMPERATURE, KL_ANNEALING_EPOCHS, MAX_EPOCHS, SLOT_ATTENTION_CONFIG, train
 
 
 def _parse_args() -> argparse.Namespace:
@@ -19,6 +19,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Path to a resume-state file (<checkpoint>_resume.pt) to continue an interrupted run",
     )
+    parser.add_argument(
+        "--max-epochs",
+        type=int,
+        default=MAX_EPOCHS,
+        help="Stop after this many epochs even if early stopping has not triggered (e.g. 40 for a quick check)",
+    )
     return parser.parse_args()
 
 
@@ -26,8 +32,8 @@ def _timestamped_checkpoint_path() -> Path:
     # 固定パス(CHECKPOINT_PATH)へそのまま保存すると、実行のたびに既存のチェックポイントを
     # 上書きしてしまう。起動時刻をsuffixにしたパスをデフォルトにすることで、既存ファイルや
     # 複数回の実行(smoke test・再試行等)同士の衝突を両方避ける。ベース名はCHECKPOINT_PATHの
-    # stem("vae_v2")をそのまま使わず固定の"vae"にする(頂点+辺構造とそれ以前の構造とで
-    # チェックポイントの互換性は元々無く、ファイル名で区別する必要がない)
+    # stem("vae_v2")をそのまま使わず固定の"vae"にする(チェックポイントにはモデルの形状・構成が保存されて
+    # おり、ファイル名で構造を区別する必要がない)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return CHECKPOINT_PATH.with_name(f"vae_{timestamp}{CHECKPOINT_PATH.suffix}")
 
@@ -54,6 +60,7 @@ def main() -> None:
         kl_annealing_epochs=KL_ANNEALING_EPOCHS,
         checkpoint_path=checkpoint_path,
         resume_from=args.resume,
+        max_epochs=args.max_epochs,
     )
 
     print(f"Best validation loss: {best_val_loss:.4f}")

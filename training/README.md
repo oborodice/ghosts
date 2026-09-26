@@ -54,8 +54,10 @@ $ uv run scripts/evaluate_vae.py
 # オフセットMSE+existence BCE+KL)でVAEを学習する。保存先は既存ファイルとの衝突を避けるため起動時刻ベースの
 # ファイル名(data/checkpoints/vae_<timestamp>.pt)になる(他のスクリプトが読むvae_v2.ptを
 # 更新する場合は、確認の上で手動でコピー・リネームする)。長時間の学習が途中で落ちた場合は、
-# 同時に保存される<出力先>_resume.ptを--resumeに指定して続きから再開できる
+# 同時に保存される<出力先>_resume.ptを--resumeに指定して続きから再開できる。
+# `--max-epochs`は、学習するエポック数の上限を変える(動作確認などで、早期終了を待たずに短く止めたい場合)
 $ uv run scripts/train_vae_v2.py
+$ uv run scripts/train_vae_v2.py --max-epochs 40
 $ uv run scripts/train_vae_v2.py --resume data/checkpoints/vae_<timestamp>_resume.pt
 
 # 学習済みモデル(vae_v2.pt)の品質を数値で確認する
@@ -152,14 +154,15 @@ $ ./scripts/runpod_create_pod.sh <network-volume-id> [pod-name] [gpu-id]
 
 # コード(scripts・pyproject.toml・uv.lock)を転送しuv syncする。初回のみ--with-dataでデータも送る。
 # アブレーション等で本番のtraining/scripts以外(スクラッチコピー)を送りたい場合は--sourceで指定する。
-# このワークロードは1プロセスあたりCPU1コア・GPU数%しか使わないため、1つのpodに複数構成を
-# 同時に置いて並列実行する余地が大きい。--remote-dirで別々の配置先に分け、--link-venvで
+# このワークロードはGPUを数%しか使わないため、1つのpodに複数構成を同時に置いて並列実行できる。
+# ただしCPUは1プロセスあたり約3〜4コアを使う(大容量の構成での実測)ため、並列数はpodのCPUの上限
+# (nprocではなく/sys/fs/cgroup/cpu.maxで確認する)で決まる。--remote-dirで別々の配置先に分け、--link-venvで
 # 既に同期済みの.venvをシンボリックリンクすれば(依存関係が同じなら)再ダウンロードなしで済む
 $ ./scripts/runpod_deploy_code.sh <ip> <port> [--with-data] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]
 
 # 学習をnohup+disownでバックグラウンド起動する(中断からの再開はremote-resume-pathを指定)。
 # --remote-dirは上と対応する配置先を指定する場合のみ
-$ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path] [--remote-dir <path>]
+$ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path] [--remote-dir <path>] [--train-args "<args>"]
 
 # 学習プロセスが動いているか・train.logの直近n行を確認する(train.logはNetwork Volume単位で
 # 永続化されるため、プロセスが動いていないのに前回の内容が表示されることがある点に注意)
