@@ -12,7 +12,7 @@ import numpy as np
 from svgpathtools import Path as SvgPath, parse_path
 
 
-class KanjiTensors(NamedTuple):
+class _KanjiTensors(NamedTuple):
     vertices: np.ndarray  # (VERTEX_COUNT, FEATURE_DIM)
     vertex_existence: np.ndarray  # (VERTEX_COUNT,)
     stroke_vertex_indices: np.ndarray  # (SLOT_COUNT, POINTS_PER_SEGMENT) -- 始点/終点それぞれが指す頂点スロット番号
@@ -25,15 +25,24 @@ class _ClusteringDiagnostics(NamedTuple):
     max_clique_diameter: float  # 同じクリークに属す端点同士の距離の最大値(構造上CONNECTION_THRESHOLD未満のはず)
 
 
+class _ExclusionCounts(NamedTuple):
+    non_kanji: int
+    variant_file: int
+    too_many_segments: int
+    too_many_vertices: int
+
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "kanjivg"
 OUTPUT_PATH = Path(__file__).resolve().parent.parent / "data" / "stroke_features_v2.npz"
 SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
 SLOT_COUNT = 26  # 折れ・ハネ検出による分割後のセグメント数の97パーセンタイル(分割前の画数の97パーセンタイルは22)
-VERTEX_COUNT = 40  # 実データでクリークベースのクラスタリングを行った場合の頂点数は97パーセンタイルで39
-# (SLOT_COUNTと同じ「97パーセンタイル基準」の考え方)。超過する字はSLOT_COUNT同様に切り捨てる
+VERTEX_COUNT = 40  # 漢字の基本のファイルでクリークベースのクラスタリングを行った場合の頂点数は97パーセンタイルで41
+# (SLOT_COUNTと同じ「97パーセンタイル基準」の考え方)。40でも96.3%を含み、差は小さいため40とする。
+# 超過する字はSLOT_COUNT同様に切り捨てる
 FEATURE_DIM = 2  # 座標(x, y)の次元数
 POINTS_PER_SEGMENT = 2
 FILENAME_CODEPOINT_PATTERN = re.compile(r"^([0-9a-fA-F]+)")
+BASE_FILENAME_PATTERN = re.compile(r"^[0-9a-fA-F]+$")
 STROKE_NUMBER_PATTERN = re.compile(r"-s(\d+)$")
 # 実データの端点間距離の分布を見ると、この値未満の距離に「実際に接続している点」の集団が偏っており、
 # 4付近を谷にして「接続していない点同士のランダムな距離」の分布に切り替わる。頂点として1つにまとめる
@@ -66,6 +75,13 @@ def _is_kanji_codepoint(codepoint: int) -> bool:
         or 0xF900 <= codepoint <= 0xFAFF  # CJK互換漢字
         or codepoint >= 0x20000  # CJK拡張B以降(補助漢字面はCJK関連ブロックのみのため上限を設けない)
     )
+
+
+def _is_base_file(svg_path: Path) -> bool:
+    # 字形バリアントのファイル(楷書の字形・書き順違い・表外字の字形など)は、同じ字を重複して学習させることになる。
+    # 書き順違いは同じ形を別のスロットの並びで持つため、スロットの意味を字ごとにばらつかせる。
+    # 漢字はすべて基本のファイルを持つので、基本のファイルだけを使う
+    return BASE_FILENAME_PATTERN.match(svg_path.stem) is not None
 
 
 def _parse_stroke_number(path_element: ET.Element) -> int:
@@ -288,13 +304,13 @@ def _pack_strokes(
 
 def _pack_kanji_tensors(
     segment_count: int, point_to_slot: dict[int, int], vertex_coords: np.ndarray, offsets: np.ndarray
-) -> KanjiTensors:
+) -> _KanjiTensors:
     vertices, vertex_existence = _pack_vertices(vertex_coords)
     stroke_vertex_indices, stroke_offsets, stroke_existence = _pack_strokes(segment_count, point_to_slot, offsets)
-    return KanjiTensors(vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence)
+    return _KanjiTensors(vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence)
 
 
-def _cluster_into_kanji_tensors(segments: list[SvgPath]) -> tuple[KanjiTensors, _ClusteringDiagnostics] | None:
+def _cluster_into_kanji_tensors(segments: list[SvgPath]) -> tuple[_KanjiTensors, _ClusteringDiagnostics] | None:
     segment_count = len(segments)
     points, offsets = _segment_geometry(segments)
     adjacency = _compute_adjacency(points, segment_count)
@@ -313,53 +329,66 @@ def _cluster_into_kanji_tensors(segments: list[SvgPath]) -> tuple[KanjiTensors, 
     return tensors, diagnostics
 
 
-def main() -> None:
-    all_tensors: list[KanjiTensors] = []
+def _collect_kanji() -> tuple[list[_KanjiTensors], list[_ClusteringDiagnostics], _ExclusionCounts]:
+    all_tensors: list[_KanjiTensors] = []
     all_diagnostics: list[_ClusteringDiagnostics] = []
     non_kanji_count = 0
-    excluded_segment_count = 0
-    excluded_vertex_count = 0
+    variant_file_count = 0
+    too_many_segments_count = 0
+    too_many_vertices_count = 0
 
-    for svg_path in DATA_DIR.glob("*.svg"):
+    # 字の並び(=学習・検証の分け方)が、ファイルシステムの列挙順によらず決まるよう、ファイル名順に読む
+    for svg_path in sorted(DATA_DIR.glob("*.svg")):
         if not _is_kanji_codepoint(_filename_codepoint(svg_path)):
             non_kanji_count += 1
+            continue
+        if not _is_base_file(svg_path):
+            variant_file_count += 1
             continue
 
         segments = _split_svg_into_segments(svg_path)
         if segments is None:
-            excluded_segment_count += 1
+            too_many_segments_count += 1
             continue
 
         result = _cluster_into_kanji_tensors(segments)
         if result is None:
-            excluded_vertex_count += 1
+            too_many_vertices_count += 1
             continue
         tensors, diagnostics = result
         all_tensors.append(tensors)
         all_diagnostics.append(diagnostics)
 
+    exclusions = _ExclusionCounts(non_kanji_count, variant_file_count, too_many_segments_count, too_many_vertices_count)
+    return all_tensors, all_diagnostics, exclusions
+
+
+def _print_summary(
+    all_tensors: list[_KanjiTensors], all_diagnostics: list[_ClusteringDiagnostics], exclusions: _ExclusionCounts
+) -> None:
     print(f"Included kanji: {len(all_tensors)}")
-    print(f"Excluded (non-kanji codepoint): {non_kanji_count}")
-    print(f"Excluded (segment count after corner splitting > {SLOT_COUNT}): {excluded_segment_count}")
-    print(f"Excluded (vertex count after clique clustering > {VERTEX_COUNT}): {excluded_vertex_count}")
+    print(f"Excluded (non-kanji codepoint): {exclusions.non_kanji}")
+    print(f"Excluded (glyph variant file of a kanji that has a base file): {exclusions.variant_file}")
+    print(f"Excluded (segment count after corner splitting > {SLOT_COUNT}): {exclusions.too_many_segments}")
+    print(f"Excluded (vertex count after clique clustering > {VERTEX_COUNT}): {exclusions.too_many_vertices}")
 
-    # KanjiTensorsは5フィールドのNamedTupleなので、zip(*all_tensors)でフィールドごとのタプルへ転置してから
-    # それぞれをnp.array化する
-    vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence = (
-        np.array(field) for field in zip(*all_tensors)
-    )
-    max_vertex_errors = [d.max_vertex_error for d in all_diagnostics]
-    max_clique_diameters = [d.max_clique_diameter for d in all_diagnostics]
-
-    avg_vertices = vertex_existence.sum(axis=1).mean()
+    avg_vertices = np.mean([tensors.vertex_existence.sum() for tensors in all_tensors])
     print(f"Average vertices per kanji: {avg_vertices:.2f}")
+    max_vertex_errors = [diagnostics.max_vertex_error for diagnostics in all_diagnostics]
     print(
         f"Vertex reconstruction error (endpoint vs. assigned vertex centroid): "
         f"mean={np.mean(max_vertex_errors):.4f} max={np.max(max_vertex_errors):.4f}"
     )
-    max_diameter = np.max(max_clique_diameters)
+    max_diameter = max(diagnostics.max_clique_diameter for diagnostics in all_diagnostics)
     print(f"Max clique diameter across all kanji: {max_diameter:.17g} (below {CONNECTION_THRESHOLD}: {max_diameter < CONNECTION_THRESHOLD})")
 
+
+def _save(all_tensors: list[_KanjiTensors]) -> None:
+    # _KanjiTensorsは5フィールドのNamedTupleなので、zip(*all_tensors)でフィールドごとのタプルへ転置してから
+    # それぞれをnp.array化する
+    vertices, vertex_existence, stroke_vertex_indices, stroke_offsets, stroke_existence = (
+        np.array(field) for field in zip(*all_tensors)
+    )
     np.savez_compressed(
         OUTPUT_PATH,
         vertices=vertices,
@@ -369,6 +398,12 @@ def main() -> None:
         stroke_existence=stroke_existence,
     )
     print(f"Saved vertex+stroke features to {OUTPUT_PATH}")
+
+
+def main() -> None:
+    all_tensors, all_diagnostics, exclusions = _collect_kanji()
+    _print_summary(all_tensors, all_diagnostics, exclusions)
+    _save(all_tensors)
 
 
 if __name__ == "__main__":
