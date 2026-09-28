@@ -181,7 +181,7 @@ $ ./scripts/runpod/terminate.sh <pod-id>
 |---|---|---|
 |[lucidrains/stylegan2-pytorch](https://github.com/lucidrains/stylegan2-pytorch) の、写像ネットワーク・生成器・判別器のコード(部分的にコピーし、改変したもの)|MIT License(全文は [licenses/stylegan2-pytorch.txt](licenses/stylegan2-pytorch.txt))|`glyph/gan.py`|
 |[DiffAugment](https://github.com/mit-han-lab/data-efficient-gans) の増強(位置ずれ・切り抜き)(コードは含まず、同じ動きになるよう書き直したもの)|BSD 2-Clause License|`scripts/train_gan.py`|
-|[Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外)|SIL Open Font License 1.1|学習データ(`scripts/download_fonts.py` で取得)|
+|[Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外)|SIL Open Font License 1.1|学習データ( `scripts/download_fonts.py` で取得)|
 |Google Fonts の2書風(Kosugi・Kosugi Maru)|Apache License 2.0|学習データ(同上)|
 
-- フォントの各ファミリーのライセンスの全文は、 `scripts/download_fonts.py` がフォントと一緒に `data/fonts/` へ取得する(`<ファミリーのディレクトリ名>_OFL.txt` / `<ファミリーのディレクトリ名>_LICENSE.txt`)
+- フォントの各ファミリーのライセンスの全文は、 `scripts/download_fonts.py` がフォントと一緒に `data/fonts/` へ取得する( `<ファミリーのディレクトリ名>_OFL.txt` / `<ファミリーのディレクトリ名>_LICENSE.txt` )

@@ -3,7 +3,7 @@
 - 幽霊文字の表示(Raspberry Pi 5 + Touch Display 2 で動かす本番の表示)
 - 生成器のONNXをONNX Runtime(CPU)で1フレームずつ動かし、形を変え続ける字を、GPUのシェーダーでフィルタをかけて描き続ける
 - 学習・評価・ONNXへの書き出しは [学習側](../training/README.md) で行う
-- 組み立てのときに、学習側で書き出した生成器(`training/data/onnx/glyph_generator.onnx`)を実行ファイルに埋め込む
+- 組み立てのときに、学習側で書き出した生成器( `training/data/onnx/glyph_generator.onnx` )を実行ファイルに埋め込む
 
 ## 構成
 
