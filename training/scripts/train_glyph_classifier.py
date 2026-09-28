@@ -131,7 +131,7 @@ def _measure_calibration(model: GlyphClassifier, images: torch.Tensor, labels: n
     first_indices, second_indices = _calibration_pairs(labels, num_classes, np.random.default_rng(SEED))
     first_features, second_features = _features(model, images, first_indices, device), _features(model, images, second_indices, device)
     calibration = calibrate((first_features - second_features).norm(dim=1).cpu(), (first_features - second_features.roll(1, 0)).norm(dim=1).cpu())
-    if calibration.different_glyph_p1 <= calibration.same_glyph_p90:
+    if calibration.different_glyph_near_distance <= calibration.same_glyph_far_distance:
         # 別の字の距離が同じ字の距離より近いことがあると、しきい値が意味をなさない(学習が足りない物差し)
         print("WARNING: the classifier does not separate different kanji from the same kanji; the thresholds are not usable", flush=True)
     return calibration

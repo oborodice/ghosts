@@ -54,20 +54,20 @@ class GlyphClassifier(nn.Module):
 
 class Calibration(NamedTuple):
     # 学習データの実在字で測った、特徴の距離の分布と、そこから決めたしきい値
-    same_glyph_p90: float  # 同じ字を別の書風で描いた組の距離の90%点
-    different_glyph_p1: float  # 別の字どうしの組の距離の1%点
+    same_glyph_far_distance: float  # 同じ字を別の書風で描いた組の距離の、遠い側の分位点(SAME_GLYPH_QUANTILE 点)
+    different_glyph_near_distance: float  # 別の字どうしの組の距離の、近い側の分位点(DIFFERENT_GLYPH_QUANTILE 点)
     same_glyph_distance: float  # 生成物どうしを同じ種類の字とみなす距離
     jump_distance: float  # モーフィングの1フレームの変化が、別の字への急な切り替わりとみなせる距離
 
 
 def calibrate(same_distances: torch.Tensor, different_distances: torch.Tensor) -> Calibration:
-    same_glyph_p90 = torch.quantile(same_distances, SAME_GLYPH_QUANTILE).item()
-    different_glyph_p1 = torch.quantile(different_distances, DIFFERENT_GLYPH_QUANTILE).item()
+    same_far = torch.quantile(same_distances, SAME_GLYPH_QUANTILE).item()
+    different_near = torch.quantile(different_distances, DIFFERENT_GLYPH_QUANTILE).item()
     return Calibration(
-        same_glyph_p90=same_glyph_p90,
-        different_glyph_p1=different_glyph_p1,
-        same_glyph_distance=same_glyph_p90 + SAME_GLYPH_POSITION * (different_glyph_p1 - same_glyph_p90),
-        jump_distance=JUMP_RATIO * different_glyph_p1,
+        same_glyph_far_distance=same_far,
+        different_glyph_near_distance=different_near,
+        same_glyph_distance=same_far + SAME_GLYPH_POSITION * (different_near - same_far),
+        jump_distance=JUMP_RATIO * different_near,
     )
 
 
