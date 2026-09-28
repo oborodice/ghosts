@@ -262,10 +262,11 @@ $ uv run scripts/sweep_vae_v2.py
 # pod作成。SSH接続の確認と、ホストのCPUの速さの簡易ベンチマーク(学習の速さはCPU側で決まりやすく、同じGPUの
 # 機種でもホストによって違う)まで行い、pod_id/ip/portを表示する。Network Volumeを使わない場合は、pod自身の
 # ディスク(podを消すと中身も消える)を使い、空きのあるデータセンターをRunPodに選ばせる
-$ ./scripts/runpod_create_pod.sh [--volume <network-volume-id>] [--gpu <gpu-id>] [--name <pod-name>]
+$ ./scripts/runpod_create_pod.sh [--volume <network-volume-id>] [--gpu <gpu-id>]... [--name <pod-name>]
 $ ./scripts/runpod_create_pod.sh
-# GPU機種を指定する(省略時はRTX 4090。在庫切れの場合に使う)
-$ ./scripts/runpod_create_pod.sh --gpu "NVIDIA L40S"
+# GPU機種を指定する(省略時はRTX 4090)。複数指定すると、空きがないときに次の機種を順に試し、1つ作れたら止める
+# (機種の名前は runpodctl gpu list で確かめる)
+$ ./scripts/runpod_create_pod.sh --gpu "NVIDIA GeForce RTX 4090" --gpu "NVIDIA RTX PRO 6000 Blackwell Server Edition" --gpu "NVIDIA L40S"
 # Network Volumeを/workspaceに付ける(そのVolumeのデータセンターで作るので、GPUの空きがないと作れないことがある)
 $ ./scripts/runpod_create_pod.sh --volume <network-volume-id>
 

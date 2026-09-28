@@ -5,32 +5,35 @@ set -euo pipefail
 # Network Volumeは指定したときだけ使う。Network Volumeはデータセンターに固定されるので、そのデータセンターのGPUに空きが
 # ないとpodを作れない。指定しなければpod自身のディスク(podを消すと中身も消える)を使い、空きのあるデータセンターを
 # RunPodに選ばせる(その場合、結果はpodを消す前に runpod_download_results.sh で必ず落とす)。
-# 課金が発生するので、作れなかったときに別の条件で作り直すのは、pod の一覧(runpodctl pod list)を確かめてから1回ずつ行う
+# --gpu を複数指定すると、空きがないときに次のGPUを順に試す。課金が発生するので、1つずつ作り、作れなかったときは
+# pod の一覧(runpodctl pod list)に同じ名前のpodがないことを確かめてから次を試し、1つ作れたらそこで止める
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 TEMPLATE_ID="runpod-torch-v280"
 DEFAULT_GPU_ID="NVIDIA GeForce RTX 4090"
 CONTAINER_DISK_GB=40
 
 usage() {
-  echo "Usage: $0 [--volume <network-volume-id>] [--gpu <gpu-id>] [--name <pod-name>]" >&2
+  echo "Usage: $0 [--volume <network-volume-id>] [--gpu <gpu-id>]... [--name <pod-name>]" >&2
   echo "  --volume: attach a Network Volume at /workspace (the pod is created in the volume's datacenter)." >&2
   echo "    Without it the pod uses its own ${CONTAINER_DISK_GB}GB disk, which is deleted with the pod." >&2
-  echo "  --gpu: defaults to '${DEFAULT_GPU_ID}'. When it has no stock, try e.g. \"NVIDIA L40S\", \"NVIDIA A40\"" >&2
-  echo "    or \"NVIDIA GeForce RTX 3090\" (the GAN is small, so the GPU type changes speed but not results)." >&2
+  echo "  --gpu: defaults to '${DEFAULT_GPU_ID}'. Give it several times to try each in order until one has stock," >&2
+  echo "    e.g. --gpu \"NVIDIA GeForce RTX 4090\" --gpu \"NVIDIA RTX PRO 6000 Blackwell Server Edition\" --gpu \"NVIDIA L40S\"" >&2
+  echo "    (the GAN is small, so the GPU type changes speed but not results; see 'runpodctl gpu list' for ids)." >&2
   exit 1
 }
 
 VOLUME_ID=""
-GPU_ID="${DEFAULT_GPU_ID}"
+GPU_IDS=()
 POD_NAME="ghosts-$(date +%Y%m%d%H%M%S)"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --volume) [ "$#" -ge 2 ] || usage; VOLUME_ID="$2"; shift 2 ;;
-    --gpu) [ "$#" -ge 2 ] || usage; GPU_ID="$2"; shift 2 ;;
+    --gpu) [ "$#" -ge 2 ] || usage; GPU_IDS+=("$2"); shift 2 ;;
     --name) [ "$#" -ge 2 ] || usage; POD_NAME="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
+[ "${#GPU_IDS[@]}" -gt 0 ] || GPU_IDS=("${DEFAULT_GPU_ID}")
 
 STORAGE_ARGS=(--container-disk-in-gb "${CONTAINER_DISK_GB}")
 if [ -n "${VOLUME_ID}" ]; then
@@ -40,21 +43,32 @@ if [ -n "${VOLUME_ID}" ]; then
     exit 1
   fi
   STORAGE_ARGS+=(--data-center-ids "${DATA_CENTER_ID}" --network-volume-id "${VOLUME_ID}" --volume-mount-path "/workspace")
-  echo "Creating pod '${POD_NAME}' (${GPU_ID}) on volume ${VOLUME_ID} (datacenter ${DATA_CENTER_ID}) ..."
+  LOCATION="on volume ${VOLUME_ID} (datacenter ${DATA_CENTER_ID})"
 else
-  echo "Creating pod '${POD_NAME}' (${GPU_ID}) without a Network Volume ..."
+  LOCATION="without a Network Volume"
 fi
 
-POD_JSON="$(runpodctl pod create --template-id "${TEMPLATE_ID}" --gpu-id "${GPU_ID}" --cloud-type SECURE \
-  "${STORAGE_ARGS[@]}" --ports "22/tcp" --name "${POD_NAME}" --wait 2>&1 || true)"
-# --wait の出力は、先頭にsshを待つ進み具合の行があり、そのあとにpodのJSONが続く。JSONの部分だけを読む
-# (全体をJSONとして読むと、作れていても読み取りに失敗し、作れなかったと誤って判定する)
-POD_JSON="$(echo "${POD_JSON}" | sed -n '/^{/,$p')"
-POD_ID="$(echo "${POD_JSON}" | jq -r '.id // empty' 2>/dev/null || true)"
-if [ -z "${POD_ID}" ]; then
+POD_ID=""
+for GPU_ID in "${GPU_IDS[@]}"; do
+  echo "Creating pod '${POD_NAME}' (${GPU_ID}) ${LOCATION} ..."
+  POD_JSON="$(runpodctl pod create --template-id "${TEMPLATE_ID}" --gpu-id "${GPU_ID}" --cloud-type SECURE \
+    "${STORAGE_ARGS[@]}" --ports "22/tcp" --name "${POD_NAME}" --wait 2>&1 || true)"
+  # --wait の出力は、先頭にsshを待つ進み具合の行があり、そのあとにpodのJSONが続く。JSONの部分だけを読む
+  # (全体をJSONとして読むと、作れていても読み取りに失敗し、作れなかったと誤って判定する)
+  POD_JSON="$(echo "${POD_JSON}" | sed -n '/^{/,$p')"
+  POD_ID="$(echo "${POD_JSON}" | jq -r '.id // empty' 2>/dev/null || true)"
+  [ -n "${POD_ID}" ] && break
   echo "Pod was not created: $(echo "${POD_JSON}" | tail -1)" >&2
-  echo "Current pods (check before trying again):" >&2
-  runpodctl pod list >&2
+  # 作れなかったと読めても、実は作られていた場合に2つ目を作らないよう、同じ名前のpodがないことを確かめてから次を試す
+  # (止まっているpodも含める。一覧を読めないときも、ないとはみなさずに止まる)
+  SAME_NAME_PODS="$(runpodctl pod list --all --name "${POD_NAME}" | jq 'length')"
+  if [ "${SAME_NAME_PODS}" != 0 ]; then
+    echo "Error: a pod named '${POD_NAME}' exists although creation looked failed; check 'runpodctl pod list --all'" >&2
+    exit 1
+  fi
+done
+if [ -z "${POD_ID}" ]; then
+  echo "No pod was created with any of: ${GPU_IDS[*]}" >&2
   exit 1
 fi
 POD_IP="$(echo "${POD_JSON}" | jq -r '.ssh.ip')"
