@@ -87,6 +87,27 @@ $ uv run scripts/export_glyph_onnx.py --checkpoint data/checkpoints/glyph_gan/<�
 
 # 書き出し先を指定する
 $ uv run scripts/export_glyph_onnx.py --checkpoint <チェックポイント> --output <ONNXのパス>
+
+# 書き出した生成器をONNX Runtime(CPU)で1フレームずつ動かし、GPUのシェーダーでフィルタ(輪郭のやわらげとくっきりさせる処理、
+# 色づけ、発光、境界を背景に溶け込ませるノイズ、背景のノイズ)をかけて、形を変え続ける字をウィンドウに表示し続ける
+# (ウィンドウはRaspberry Pi Touch Display 2を横向きにした1280x720を、既定では0.6倍に縮めた大きさで、字は中央に描く)。
+# 1秒ごとに、FPSと、生成器・描画の1フレームの時間を表示する。Escかqで終わる
+$ uv run scripts/run_glyph_onnx.py
+
+# 全画面で表示する
+$ uv run scripts/run_glyph_onnx.py --fullscreen
+
+# 別の生成器のONNXを使い、字の変わり方(simplex noiseの軌跡)を乱数の種で変える
+$ uv run scripts/run_glyph_onnx.py --model <ONNXのパス> --seed 1
+
+# ウィンドウを実寸(1280x720)で開く(既定は、開発機のMacで実物に近い見かけになるよう0.6倍に縮める)
+$ uv run scripts/run_glyph_onnx.py --scale 1
+
+# ウィンドウを出さずに、30秒ぶんを動画に書き出す(画面全体を実寸の1280x720で)
+$ uv run scripts/run_glyph_onnx.py --record <mp4のパス> --seconds 30
+
+# ウィンドウを出さずに、10秒ぶんをGIFに書き出す(字の正方形だけを350pxで)
+$ uv run scripts/run_glyph_onnx.py --record <GIFのパス> --seconds 10
 ```
 
 ## 実行手順
@@ -283,6 +304,7 @@ $ ./scripts/runpod_terminate.sh <pod-id>
 |---|---|---|
 | [lucidrains/stylegan2-pytorch](https://github.com/lucidrains/stylegan2-pytorch) の、写像ネットワーク・生成器・判別器のコード(部分的にコピーし、改変したもの) | MIT License(全文は [licenses/stylegan2-pytorch.txt](licenses/stylegan2-pytorch.txt)) | `scripts/glyph_gan.py` |
 | [DiffAugment](https://github.com/mit-han-lab/data-efficient-gans) の増強(位置ずれ・切り抜き)(コードは含まず、同じ動きになるよう書き直したもの) | BSD 2-Clause License | `scripts/train_glyph_gan.py` |
+| [hash-prospector](https://github.com/skeeto/hash-prospector) の整数のハッシュ `lowbias32` (関数をそのままコピーしたもの) | The Unlicense | `scripts/shaders/glyph.frag` |
 | [Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外) | SIL Open Font License 1.1 | 学習データ(`scripts/download_fonts.py` で取得) |
 | Google Fonts の2書風(Kosugi・Kosugi Maru) | Apache License 2.0 | 学習データ(同上) |
 
