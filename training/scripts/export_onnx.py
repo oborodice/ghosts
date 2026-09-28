@@ -15,7 +15,8 @@ from glyph.inference import GlyphGenerator, load_glyph_generator
 from glyph.walk import simplex_scattered
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-# PyTorchの既定(20)より古い版にして、表示側のONNX Runtimeが古い版(1.16以降)でも読めるようにする
+# PyTorchの書き出しが中で使う演算の定義(torchlib)の版。ほかの版を指定すると、書き出したあとに版の変換が入る。
+# 生成器は基本の演算だけを使うので、新しい版にする利点はない(表示の実行ファイルに入れたONNX Runtime 1.28 で読める)
 OPSET_VERSION = 18
 
 
