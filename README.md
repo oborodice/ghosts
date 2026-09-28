@@ -8,4 +8,3 @@
 
 - [学習側](training/README.md)
 - [表示側](display/README.md)
-- [フロントエンド](web/README.md)
