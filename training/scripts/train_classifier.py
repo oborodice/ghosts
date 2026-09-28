@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 生成した字の評価の物差しにする文字認識のモデル(glyph_classifier.py)を、学習データ(build_glyph_dataset.py で作る)で学習する。
+# 生成した字の評価の物差しにする文字認識のモデル(glyph/classifier.py)を、学習データ(build_dataset.py で作る)で学習する。
 # 3書風(明朝・手書き・ゴシックから1つずつ)を学習から外し、見たことのない書風でも読めるかを確かめる(物差しが書風の癖ではなく、
 # 字の形を見ているか)。生成物の粗さに強くするため、学習のときに位置ずれ・拡大縮小・ぼかし・ノイズを加える。
 # 学習のあと、実在字で特徴の距離の分布を測り、生成物の評価に使うしきい値と一緒に data/glyph_classifier.pt へ保存する
@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from glyph_classifier import Calibration, GlyphClassifier, calibrate
+from glyph.classifier import Calibration, GlyphClassifier, calibrate
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 HELD_OUT_STYLES = ("Zen Old Mincho", "Yomogi", "LINE Seed JP")

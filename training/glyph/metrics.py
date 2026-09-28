@@ -1,4 +1,4 @@
-# 生成した字を評価する指標のうち、学習中の見張り(train_glyph_gan.py)と評価(evaluate_glyph_gan.py)で共通に使うもの
+# 生成した字を評価する指標のうち、学習中の見張り(train_gan.py)と評価(evaluate_gan.py)で共通に使うもの
 from typing import NamedTuple
 
 import torch

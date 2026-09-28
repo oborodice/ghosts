@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# コード(scripts・pyproject.toml・uv.lock)は変わるたびに毎回送る想定のため常に送る。
-# 学習データ(build_glyph_dataset.py で作った data/glyphs_<解像度>.npz)は滅多に変わらないため、指定したときだけ送る。
+# コード(scripts・glyph・pyproject.toml・uv.lock)は変わるたびに毎回送る想定のため常に送る。
+# 学習データ(build_dataset.py で作った data/glyphs_<解像度>.npz)は滅多に変わらないため、指定したときだけ送る。
 # 保存ごとの評価に使う文字認識のモデルの重みも、指定したときだけ送る。
 # データはどのソースを使う場合でも実データ(本番のtraining/data/)から送る
 # (アブレーション用のスクラッチディレクトリはコードのみでデータを複製していないため)
@@ -21,11 +21,11 @@ UV_ENV_VARS="UV_PYTHON_INSTALL_DIR=/workspace/.uv-python"
 usage() {
   echo "Usage: $0 <ip> <port> [--data <file>] [--classifier <file>] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]" >&2
   echo "  --data: send a dataset file under training/data/ (e.g. glyphs_64.npz) to the same place on the pod" >&2
-  echo "  --classifier: send a classifier weight file under training/data/ (for train_glyph_gan.py --classifier)" >&2
-  echo "  --source: send scripts/pyproject.toml/uv.lock from a directory other than training/ (e.g. a scratch copy for a parallel ablation)" >&2
+  echo "  --classifier: send a classifier weight file under training/data/ (for train_gan.py --classifier)" >&2
+  echo "  --source: send scripts/glyph/pyproject.toml/uv.lock from a directory other than training/ (e.g. a scratch copy for a parallel ablation)" >&2
   echo "  --remote-dir: deploy under a path other than ${DEFAULT_REMOTE_DIR} (a self-contained copy with its own data/;" >&2
   echo "  checkpoint/data paths are relative to the script file, not the CWD, so it needs --data too)." >&2
-  echo "  Several runs can also share one remote-dir: train_glyph_gan.py writes each run under its own --name" >&2
+  echo "  Several runs can also share one remote-dir: train_gan.py writes each run under its own --name" >&2
   echo "  --link-venv: skip 'uv sync' and symlink .venv from another already-synced remote-dir on the same pod instead" >&2
   echo "  (saves re-downloading ~3GB of CUDA/torch packages; only valid when pyproject.toml/uv.lock are identical" >&2
   echo "  to that remote-dir's, which holds as long as only the swept constants differ, not dependencies)" >&2
@@ -41,7 +41,7 @@ POD_PORT="$2"
 shift 2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TRAINING_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TRAINING_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SOURCE_DIR="${TRAINING_DIR}"
 REMOTE_DIR="${DEFAULT_REMOTE_DIR}"
 DATA_FILES=()
@@ -62,8 +62,8 @@ SCP=(scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -P "${POD_PORT}")
 
 "${SSH[@]}" "mkdir -p ${REMOTE_DIR}/data"
 
-echo "Sending scripts/pyproject.toml/uv.lock from ${SOURCE_DIR} ..."
-"${SCP[@]}" -r "${SOURCE_DIR}/scripts" "${SOURCE_DIR}/pyproject.toml" "${SOURCE_DIR}/uv.lock" "root@${POD_IP}:${REMOTE_DIR}/"
+echo "Sending scripts/glyph/pyproject.toml/uv.lock from ${SOURCE_DIR} ..."
+"${SCP[@]}" -r "${SOURCE_DIR}/scripts" "${SOURCE_DIR}/glyph" "${SOURCE_DIR}/pyproject.toml" "${SOURCE_DIR}/uv.lock" "root@${POD_IP}:${REMOTE_DIR}/"
 
 for data_file in ${DATA_FILES[@]+"${DATA_FILES[@]}"}; do
   echo "Sending data/${data_file} ..."

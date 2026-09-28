@@ -11,9 +11,9 @@ DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
 
 usage() {
   echo "Usage: $0 <ip> <port> --name <run-name> [--keep-remote] [--remote-dir <path>]" >&2
-  echo "  --name: the run to download (the name given to runpod_launch_training.sh)" >&2
+  echo "  --name: the run to download (the name given to launch_training.sh)" >&2
   echo "  --keep-remote: do not delete the checkpoints and snapshots on the pod after a verified download" >&2
-  echo "  --remote-dir: download from a path other than ${DEFAULT_REMOTE_DIR} (see runpod_deploy_code.sh --remote-dir)" >&2
+  echo "  --remote-dir: download from a path other than ${DEFAULT_REMOTE_DIR} (see deploy_code.sh --remote-dir)" >&2
   exit 1
 }
 
@@ -39,7 +39,7 @@ done
 [ -n "${RUN_NAME}" ] || usage
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOCAL_RUN_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/data/checkpoints/glyph_gan/${RUN_NAME}"
+LOCAL_RUN_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)/data/checkpoints/glyph_gan/${RUN_NAME}"
 REMOTE_RUN_DIR="${REMOTE_DIR}/data/checkpoints/glyph_gan/${RUN_NAME}"
 SSH=(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -p "${POD_PORT}" "root@${POD_IP}")
 SCP=(scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -P "${POD_PORT}")

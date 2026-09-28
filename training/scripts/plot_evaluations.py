@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# 学習中の保存ごとの評価の値(train_glyph_gan.py が学習の名前のディレクトリに書く evaluation.csv)を、複数の学習ぶん並べて、
+# 学習中の保存ごとの評価の値(train_gan.py が学習の名前のディレクトリに書く evaluation.csv)を、複数の学習ぶん並べて、
 # 歩数ごとの推移を1枚の画像に描く(学習を延ばすか・どの時点を使うか・スイープの条件どうしの比べを、曲線で見るため)。
-# 評価の値の意味と関門は glyph_evaluation.py。関門を満たさなかった時点は、白抜きの点で描く
+# 評価の値の意味と関門は glyph/evaluation.py。関門を満たさなかった時点は、白抜きの点で描く
 import argparse
 import csv
 from pathlib import Path

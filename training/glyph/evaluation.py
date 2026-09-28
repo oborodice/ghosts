@@ -1,4 +1,4 @@
-# 学習したGANを、文字認識のモデル(train_glyph_classifier.py)の特徴の空間で評価する(評価のスクリプトと、学習中の保存ごとの評価で共通)。
+# 学習したGANを、文字認識のモデル(train_classifier.py)の特徴の空間で評価する(評価のスクリプトと、学習中の保存ごとの評価で共通)。
 # 推論と同じ流れ(simplex noiseの値 → 正規分布への変換 → 写像ネットワーク → 生成器、移動平均の版の重み)で字を作り、次を測る:
 # - 新しさ: 知らない字になっているかを見るための、実在字として確信を持って読まれない(最も高い確率が0.5未満の)字の割合
 # - 2字の種類の数: 同じ字ばかり出る崩壊を見るための、ランダムに選んだ2字が同じ種類である確率の逆数(実在字どうしの値を並べる)
@@ -16,10 +16,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from glyph_classifier import Calibration, GlyphClassifier
-from glyph_inference import GlyphGenerator
-from glyph_metrics import artifact_rates, pair_types
-from glyph_walk import DEFAULT_NOISE_SPEED, DISPLAY_FPS, simplex_scattered, simplex_walk
+from glyph.classifier import Calibration, GlyphClassifier
+from glyph.inference import GlyphGenerator
+from glyph.metrics import artifact_rates, pair_types
+from glyph.walk import DEFAULT_NOISE_SPEED, DISPLAY_FPS, simplex_scattered, simplex_walk
 
 NOVELTY_PROBABILITY = 0.5
 PRECISION_RECALL_NEIGHBORS = 5

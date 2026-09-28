@@ -1,5 +1,5 @@
 # 学習したGANで字を作る推論の部分(PyTorch。ONNXへの書き出しと評価で使う)。
-# simplex noiseの値(glyph_walk.py)を正規分布に写してから、写像ネットワーク・生成器に通す
+# simplex noiseの値(glyph/walk.py)を正規分布に写してから、写像ネットワーク・生成器に通す
 import functools
 import math
 from pathlib import Path
@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from torch import nn
 
-import glyph_gan
-from glyph_walk import simplex_scattered
+from glyph import gan
+from glyph.walk import simplex_scattered
 
 NOISE_IMAGE_SEED = 0
 # simplex noiseの値を正規分布に写す対応表: simplex noiseの値の範囲を等間隔に区切った点ごとに、その値以下になる割合(大量の値から数えた
@@ -24,7 +24,7 @@ GAUSSIANIZE_SEED = 12345
 class GlyphGenerator(nn.Module):
     # simplex noiseの値 (バッチ, 潜在の次元の数) → インクの画像 (バッチ, 1, 解像度, 解像度)、0=紙〜1=インク。
     # ノイズの画像(ノイズの注入)は1枚に固定する(フレームごとに変えると、字がちらつくため)
-    def __init__(self, mapping: nn.Module, generator: glyph_gan.Generator, latent_dim: int, table: torch.Tensor, noise_image: torch.Tensor):
+    def __init__(self, mapping: nn.Module, generator: gan.Generator, latent_dim: int, table: torch.Tensor, noise_image: torch.Tensor):
         super().__init__()
         self.latent_dim = latent_dim
         self.mapping = mapping
@@ -47,12 +47,12 @@ class GlyphGenerator(nn.Module):
 
     def generate_in_chunks(self, simplex_values: torch.Tensor) -> torch.Tensor:
         # ONNXに書き出す forward は1字ずつ呼ぶ。評価などで多くの字を作るときはこちら
-        chunk = glyph_gan.GENERATION_CHUNK
+        chunk = gan.GENERATION_CHUNK
         return torch.cat([self(simplex_values[start:start + chunk]) for start in range(0, len(simplex_values), chunk)])
 
 
-def _load_mapping_and_generator(checkpoint_path: Path, device: torch.device | str) -> tuple[glyph_gan.MappingNetwork, glyph_gan.Generator, int]:
-    # train_glyph_gan.py のチェックポイントから、推論に使う移動平均の版の写像ネットワークと生成器を作る。3つめの返り値は潜在の次元の数
+def _load_mapping_and_generator(checkpoint_path: Path, device: torch.device | str) -> tuple[gan.MappingNetwork, gan.Generator, int]:
+    # train_gan.py のチェックポイントから、推論に使う移動平均の版の写像ネットワークと生成器を作る。3つめの返り値は潜在の次元の数
     state = torch.load(checkpoint_path, map_location=device)
     config = state["config"]
     generator_state = state["generator_ema"]
@@ -60,9 +60,9 @@ def _load_mapping_and_generator(checkpoint_path: Path, device: torch.device | st
     # 出力はチャンネルの平均をインクの濃さとする
     image_channels = generator_state["blocks.0.to_image.conv.weight"].shape[0]
     num_layers = len([key for key in generator_state if key.endswith(".conv1.weight")])
-    image_size = glyph_gan.INITIAL_SIZE * 2 ** (num_layers - 1)
-    mapping = glyph_gan.MappingNetwork(config["latent_dim"], config["mapping_depth"], config["mapping_learning_rate_multiplier"])
-    generator = glyph_gan.Generator(image_size, config["latent_dim"], config["capacity"], image_channels)
+    image_size = gan.INITIAL_SIZE * 2 ** (num_layers - 1)
+    mapping = gan.MappingNetwork(config["latent_dim"], config["mapping_depth"], config["mapping_learning_rate_multiplier"])
+    generator = gan.Generator(image_size, config["latent_dim"], config["capacity"], image_channels)
     mapping.load_state_dict(state["mapping_ema"])
     generator.load_state_dict(generator_state)
     return mapping, generator, config["latent_dim"]

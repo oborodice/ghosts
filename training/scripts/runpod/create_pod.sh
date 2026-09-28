@@ -4,7 +4,7 @@ set -euo pipefail
 # RunPodのpodを1つ作り、SSHで入れることと、ホストのCPUの速さを確かめる。
 # Network Volumeは指定したときだけ使う。Network Volumeはデータセンターに固定されるので、そのデータセンターのGPUに空きが
 # ないとpodを作れない。指定しなければpod自身のディスク(podを消すと中身も消える)を使い、空きのあるデータセンターを
-# RunPodに選ばせる(その場合、結果はpodを消す前に runpod_download_results.sh で必ず落とす)。
+# RunPodに選ばせる(その場合、結果はpodを消す前に download_results.sh で必ず落とす)。
 # --gpu を複数指定すると、空きがないときに次のGPUを順に試す。課金が発生するので、1つずつ作り、作れなかったときは
 # pod の一覧(runpodctl pod list)に同じ名前のpodがないことを確かめてから次を試し、1つ作れたらそこで止める
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"

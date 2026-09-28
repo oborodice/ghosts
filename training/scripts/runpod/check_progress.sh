@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# podの上のジョブ(runpod_launch_job.sh・runpod_launch_training.sh で始めたもの)が動いているか・どう終わったかと、ログの直近の行を表示する。
+# podの上のジョブ(launch_job.sh・launch_training.sh で始めたもの)が動いているか・どう終わったかと、ログの直近の行を表示する。
 # 学習(--name)なら、最新の指標・最新の評価も出す。--follow では、終わるまで新しい行を流し、ジョブの終了コードで終わる
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
@@ -12,12 +12,12 @@ TRAINING_FOLLOW_PATTERN='^evaluation at|^done$|Traceback|Error|Killed|out of mem
 
 usage() {
   echo "Usage: $0 <ip> <port> (--name <run-name> | --job <job-name>) [--lines <n>] [--follow [--interval <seconds>]] [--remote-dir <path>]" >&2
-  echo "  --name: the training run to check (the name given to runpod_launch_training.sh)" >&2
-  echo "  --job: any job to check (the job name given to runpod_launch_job.sh)" >&2
+  echo "  --name: the training run to check (the name given to launch_training.sh)" >&2
+  echo "  --job: any job to check (the job name given to launch_job.sh)" >&2
   echo "  --lines: number of recent log lines to show (default ${DEFAULT_LINES})" >&2
   echo "  --follow: keep printing new log lines (for a training run: evaluations, the end and errors) until the job ends," >&2
   echo "    polling every --interval seconds (default ${DEFAULT_INTERVAL_SECONDS}); exits with the job's exit code" >&2
-  echo "  --remote-dir: check a path other than ${DEFAULT_REMOTE_DIR} (see runpod_deploy_code.sh --remote-dir)" >&2
+  echo "  --remote-dir: check a path other than ${DEFAULT_REMOTE_DIR} (see deploy_code.sh --remote-dir)" >&2
   exit 1
 }
 

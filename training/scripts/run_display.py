@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# 生成器のONNX(export_glyph_onnx.py)をONNX Runtime(CPU)で1フレームずつ動かし、形を変え続ける字を、
-# GPUでフィルタをかけて(glyph_renderer.py)ウィンドウに描き続ける。
+# 生成器のONNX(export_onnx.py)をONNX Runtime(CPU)で1フレームずつ動かし、形を変え続ける字を、
+# GPUでフィルタをかけて(glyph/renderer.py)ウィンドウに描き続ける。
 # 1秒ごとに、FPSと、生成器・描画の1フレームの時間をターミナルに出す。--record を指定すると、ウィンドウを出さずに mp4 か GIF に書き出す
 import argparse
 import itertools
@@ -16,8 +16,8 @@ from OpenGL import GL
 from opensimplex import OpenSimplex
 from PIL import Image
 
-from glyph_renderer import GlyphRenderer, create_window
-from glyph_walk import DEFAULT_NOISE_SPEED, DISPLAY_FPS, simplex_frame
+from glyph.renderer import GlyphRenderer, create_window
+from glyph.walk import DEFAULT_NOISE_SPEED, DISPLAY_FPS, simplex_frame
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # Raspberry Pi Touch Display 2(5インチ・7インチ、720x1280で縦長が本来の向き)を横向きにした大きさ(Piでは画面を回転させて使う)
@@ -30,7 +30,7 @@ MP4_CRF = 18
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=Path, default=DATA_DIR / "onnx" / "glyph_generator.onnx")  # export_glyph_onnx.py で書き出した生成器
+    parser.add_argument("--model", type=Path, default=DATA_DIR / "onnx" / "glyph_generator.onnx")  # export_onnx.py で書き出した生成器
     parser.add_argument("--seed", type=int, default=0)  # simplex noiseの軌跡を選ぶ(変えると、別の字の変わり方になる)
     parser.add_argument("--fullscreen", action="store_true")
     # ウィンドウの大きさの倍率。既定は、開発機のMacで実物に近い見かけにする値(Macのウィンドウは約110〜130ppiで、7インチの画面の

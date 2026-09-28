@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 学習したGAN(train_glyph_gan.py のチェックポイント)の生成器を、ONNXに書き出す。
+# 学習したGAN(train_gan.py のチェックポイント)の生成器を、ONNXに書き出す。
 # 入力はsimplex noiseの値(潜在の次元の数)で、正規分布への変換 → 写像ネットワーク → 生成器 → インクの画像(0=紙〜1=インク、1チャンネル)。
 # - 推論には移動平均の版の重みを使う
 # - ノイズの画像(ノイズの注入)は、フレームごとに変えると字がちらつくため、定数として埋め込む
@@ -11,8 +11,8 @@ import numpy as np
 import onnxruntime
 import torch
 
-from glyph_inference import GlyphGenerator, load_glyph_generator
-from glyph_walk import simplex_scattered
+from glyph.inference import GlyphGenerator, load_glyph_generator
+from glyph.walk import simplex_scattered
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # PyTorchの既定(20)より古い版にして、表示側のONNX Runtimeが古い版(1.16以降)でも読めるようにする

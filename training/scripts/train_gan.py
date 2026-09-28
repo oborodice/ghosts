@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# フォントで描いた漢字の画像(build_glyph_dataset.py で作る)で、GAN(glyph_gan.py)を学習する。
+# フォントで描いた漢字の画像(build_dataset.py で作る)で、GAN(glyph/gan.py)を学習する。
 #
 # 下の定数は学習の設定。スイープでは --override NAME=VALUE で1回の学習だけ変える(使った値はチェックポイントに残る)。
 # そのうち、部分的な崩壊(同じ字ばかり出る)と長い学習での崩れを避けるために、比べて選んだもの:
@@ -26,11 +26,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-import glyph_gan
-from glyph_classifier import load_classifier
-from glyph_evaluation import CSV_HEADER, GlyphEvaluator
-from glyph_inference import load_glyph_generator
-from glyph_metrics import artifact_rates, pairwise_distances
+from glyph import gan
+from glyph.classifier import load_classifier
+from glyph.evaluation import CSV_HEADER, GlyphEvaluator
+from glyph.inference import load_glyph_generator
+from glyph.metrics import artifact_rates, pairwise_distances
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 EVALUATION_CSV = "evaluation.csv"  # 保存ごとの評価の値の書き出し先(学習の名前のディレクトリの中)
@@ -139,11 +139,11 @@ def _checkpoint_config(args: argparse.Namespace) -> dict:
 
 @dataclass
 class _Models:
-    mapping: glyph_gan.MappingNetwork
-    generator: glyph_gan.Generator
-    discriminator: glyph_gan.Discriminator
-    mapping_ema: glyph_gan.MappingNetwork  # 移動平均の版(推論に使う)
-    generator_ema: glyph_gan.Generator
+    mapping: gan.MappingNetwork
+    generator: gan.Generator
+    discriminator: gan.Discriminator
+    mapping_ema: gan.MappingNetwork  # 移動平均の版(推論に使う)
+    generator_ema: gan.Generator
     generator_optimizer: torch.optim.Optimizer
     discriminator_optimizer: torch.optim.Optimizer
 
@@ -154,10 +154,10 @@ class _Models:
 
 
 def _build_models(image_size: int, device: torch.device) -> _Models:
-    mapping = glyph_gan.MappingNetwork(LATENT_DIM, MAPPING_DEPTH, MAPPING_LEARNING_RATE_MULTIPLIER).to(device)
-    generator = glyph_gan.Generator(image_size, LATENT_DIM, CAPACITY, image_channels=1).to(device)
-    discriminator = glyph_gan.Discriminator(image_size, CAPACITY, image_channels=1).to(device)
-    glyph_gan.init_weights(generator, discriminator)
+    mapping = gan.MappingNetwork(LATENT_DIM, MAPPING_DEPTH, MAPPING_LEARNING_RATE_MULTIPLIER).to(device)
+    generator = gan.Generator(image_size, LATENT_DIM, CAPACITY, image_channels=1).to(device)
+    discriminator = gan.Discriminator(image_size, CAPACITY, image_channels=1).to(device)
+    gan.init_weights(generator, discriminator)
     mapping_ema, generator_ema = copy.deepcopy(mapping).eval(), copy.deepcopy(generator).eval()
     for param in [*mapping_ema.parameters(), *generator_ema.parameters()]:
         param.requires_grad_(False)
@@ -188,7 +188,7 @@ class _Monitor:
 
 def _build_monitor(classifier_path: Path | None, images: torch.Tensor, device: torch.device) -> _Monitor:
     evaluator = None
-    if classifier_path is not None:  # train_glyph_classifier.py で学習した文字認識のモデル(しきい値も一緒に入っている)
+    if classifier_path is not None:  # train_classifier.py で学習した文字認識のモデル(しきい値も一緒に入っている)
         # モデルを作るときの重みの初期化は、学習と同じ乱数を使う。評価の有無で学習が変わらないよう、別の乱数の流れで作る
         with torch.random.fork_rng(devices=[]):
             classifier, calibration = load_classifier(classifier_path, device)
@@ -211,7 +211,7 @@ def _prepare_evaluation_csv(output_dir: Path, step: int) -> None:
         writer.writerows(rows)
 
 
-def _random_styles(mapping: glyph_gan.MappingNetwork, num_layers: int, device: torch.device) -> torch.Tensor:
+def _random_styles(mapping: gan.MappingNetwork, num_layers: int, device: torch.device) -> torch.Tensor:
     # 返り値は (バッチ, 段の数, 潜在の次元)
     styles = mapping(torch.randn(BATCH, LATENT_DIM, device=device))[:, None, :].expand(-1, num_layers, -1)
     if random.random() < STYLE_MIX_PROBABILITY:
@@ -321,7 +321,7 @@ def _generator_step(models: _Models, step: int, path_length_mean: float | None, 
 @torch.no_grad()
 def _update_ema(models: _Models, images_seen: int) -> None:
     half_life = min(EMA_HALF_LIFE_KIMG * 1000, images_seen * EMA_RAMPUP_RATIO)
-    ema_decay = 0.5 ** (BATCH / max(half_life, glyph_gan.EPSILON))
+    ema_decay = 0.5 ** (BATCH / max(half_life, gan.EPSILON))
     for ema, model in ((models.mapping_ema, models.mapping), (models.generator_ema, models.generator)):
         for ema_param, param in zip(ema.parameters(), model.parameters()):
             ema_param.lerp_(param, 1 - ema_decay)
@@ -346,7 +346,7 @@ def _metrics_text(models: _Models, monitor: _Monitor) -> str:
     generator.eval()
     style = mapping(torch.randn(METRIC_SAMPLES, LATENT_DIM, device=monitor.reference_noise.device))
     spread = (pairwise_distances(style).mean() / style.norm(dim=1).mean()).item()
-    ink = glyph_gan.generate_in_chunks(generator, style[:, None, :].expand(-1, generator.num_layers, -1), monitor.reference_noise).clamp(0, 1)
+    ink = gan.generate_in_chunks(generator, style[:, None, :].expand(-1, generator.num_layers, -1), monitor.reference_noise).clamp(0, 1)
     rates = artifact_rates(ink)
     mapping.train()
     generator.train()
@@ -429,8 +429,8 @@ def main() -> None:
         _restore_settings(state["config"])
     _apply_overrides(args.override)  # 再開のときに指定すると、保存した設定のうえから変える
     config = _checkpoint_config(args)
-    if device.type == "mps" and BATCH * glyph_gan.MAX_FEATURES > glyph_gan.MPS_GROUPED_CONV_MAX_CHANNELS:
-        raise SystemExit(f"BATCH {BATCH} is too large on Apple Silicon (MPS): at most {glyph_gan.GENERATION_CHUNK}")
+    if device.type == "mps" and BATCH * gan.MAX_FEATURES > gan.MPS_GROUPED_CONV_MAX_CHANNELS:
+        raise SystemExit(f"BATCH {BATCH} is too large on Apple Silicon (MPS): at most {gan.GENERATION_CHUNK}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 学習データ(uint8、0=紙〜255=インク)を丸ごとデバイスに載せ、バッチは添字を選ぶだけで作る(読み込みの手間を減らす)

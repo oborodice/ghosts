@@ -3,7 +3,7 @@ set -euo pipefail
 
 # podの上で、scripts/ の任意のPythonスクリプトを、SSHから切り離してバックグラウンドで始める(学習のほか、文字認識のモデルの学習・
 # 評価・分析など)。ログは <ジョブの名前>.log、プロセスの番号は <ジョブの名前>.pid に書き、終わるとログの最後に「exit code <n>」を足す
-# (runpod_check_progress.sh --job で、動いているか・どう終わったかを見る)。setsid で新しいセッションにし、標準入出力もすべて
+# (check_progress.sh --job で、動いているか・どう終わったかを見る)。setsid で新しいセッションにし、標準入出力もすべて
 # ログへ向けるので、SSHを切っても止まらず、ローカルのsshコマンドもすぐに戻る
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
@@ -14,8 +14,8 @@ usage() {
   echo "Usage: $0 <ip> <port> --job <job-name> [--append] [--remote-dir <path>] -- <script> [args...]" >&2
   echo "  --job: the job's name; the log goes to <job-name>.log and the process id to <job-name>.pid under the remote dir" >&2
   echo "  --append: append to an existing log instead of overwriting it (e.g. when resuming)" >&2
-  echo "  --remote-dir: launch in a copy deployed under a path other than ${DEFAULT_REMOTE_DIR} (see runpod_deploy_code.sh)" >&2
-  echo "  <script> [args...]: run as '.venv/bin/python3 -u <script> [args...]' in the remote dir (e.g. scripts/train_glyph_classifier.py)" >&2
+  echo "  --remote-dir: launch in a copy deployed under a path other than ${DEFAULT_REMOTE_DIR} (see deploy_code.sh)" >&2
+  echo "  <script> [args...]: run as '.venv/bin/python3 -u <script> [args...]' in the remote dir (e.g. scripts/train_classifier.py)" >&2
   exit 1
 }
 
@@ -49,8 +49,10 @@ dir="$1"; job="$2"; append="$3"; shift 3
 cd "${dir}" || exit 1
 # 背後に回すのは、出力をすべてログへ向けた1つのコマンドだけにする(複数のコマンドをまとめて背後に回すと、その子シェルの出力が
 # SSHにつながったままになり、SSHが戻らない)。uv run ではなく .venv の python を直接呼ぶ(--link-venv でつないだ venv に対して、
-# uv がロックの確認・同期をし直そうとするのを避ける)
+# uv がロックの確認・同期をし直そうとするのを避ける)。部品のパッケージ(glyph)は、この配置先のものを使うよう PYTHONPATH の先頭に置く
+# (--link-venv でつないだ venv は、venv を作った配置先の glyph を指しているため)
 wrapper='"$@"; echo "exit code $?"'
+export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
 if [ "${append}" = 1 ]; then
   setsid nohup bash -c "${wrapper}" job .venv/bin/python3 -u "$@" >> "${job}.log" 2>&1 < /dev/null &
 else

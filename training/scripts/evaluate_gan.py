@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 学習したGAN(train_glyph_gan.py のチェックポイント・スナップショット)を評価する(測る指標と関門は glyph_evaluation.py)。
+# 学習したGAN(train_gan.py のチェックポイント・スナップショット)を評価する(測る指標と関門は glyph/evaluation.py)。
 # 複数を渡すと、同じ実在字・同じsimplex noiseの位置で比べ、関門をすべて満たすもののうち網羅率が最も高いものを示す。
 # あわせて、生成した字を並べた画像を、それぞれの隣に保存する
 import argparse
@@ -10,9 +10,9 @@ import numpy as np
 import torch
 from PIL import Image
 
-from glyph_classifier import load_classifier
-from glyph_evaluation import CSV_HEADER, Evaluation, GlyphEvaluator, best_by_coverage
-from glyph_inference import load_glyph_generator
+from glyph.classifier import load_classifier
+from glyph.evaluation import CSV_HEADER, Evaluation, GlyphEvaluator, best_by_coverage
+from glyph.inference import load_glyph_generator
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SAMPLE_GRID = 8  # 保存する画像に並べる字の数(縦横それぞれ)
