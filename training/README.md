@@ -12,6 +12,11 @@ $ uv sync
 # data/kanjivg/配下にSVGファイルが展開される(取得済みの場合は再ダウンロードをスキップする)
 $ ./scripts/download_kanjivg.sh
 
+# 学習データ(フォントで描いた漢字の画像)に使う27書風のフォント(Google Fonts、OFL / Apache License 2.0)の取得
+# data/fonts/配下に、フォントと各ファミリーのライセンスのファイルが置かれる。取得元のコミットを固定し、
+# 各フォントをgitのblobの識別子で照合する(照合済みのファイルがある場合は再ダウンロードをスキップする)
+$ uv run scripts/download_fonts.py
+
 # RunPodへのデプロイスクリプト(scripts/runpod_*.sh)が、pod作成時のJSON出力から
 # id・IP・ポートを取り出すために使う
 $ brew install jq
@@ -209,3 +214,14 @@ $ ./scripts/runpod_download_results.sh <ip> <port> latest vae_v2_<name>.pt --rem
 # podを削除して課金を止める(Network Volumeは残る)
 $ ./scripts/runpod_terminate.sh <pod-id>
 ```
+
+## ライセンス
+
+- このディレクトリのコードが使う、第三者のコード・データ・フォントと、そのライセンス
+
+| 対象 | ライセンス | 利用箇所 |
+|---|---|---|
+| [Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外) | SIL Open Font License 1.1 | 学習データ(`scripts/download_fonts.py` で取得) |
+| Google Fonts の2書風(Kosugi・Kosugi Maru) | Apache License 2.0 | 学習データ(同上) |
+
+- フォントの各ファミリーのライセンスの全文は、 `scripts/download_fonts.py` がフォントと一緒に `data/fonts/` へ取得する(`<ファミリーのディレクトリ名>_OFL.txt` / `<ファミリーのディレクトリ名>_LICENSE.txt`)
