@@ -67,6 +67,26 @@ $ uv run scripts/train_glyph_classifier.py
 
 # 学習データと保存先を指定する
 $ uv run scripts/train_glyph_classifier.py --data data/glyphs_128.npz --output data/glyph_classifier_128.pt
+
+# 学習したチェックポイント(推論に使う移動平均の版の重み)を評価する。新しさ(知らない字になっているか)、
+# 2字の種類の数(同じ字ばかり出ていないか)、崩れの割合、精度・再現率・密度・網羅率(実在字の分布との重なり。
+# 実在字どうしの値を並べる)、なめらかさ(表示側と同じsimplex noiseの軌跡での、急な切り替わりの割合)を表示し、
+# 生成した字の一覧の画像をチェックポイントの隣に保存する
+$ uv run scripts/evaluate_glyph_gan.py --checkpoint data/checkpoints/glyph_gan/<名前>/checkpoint_<歩数>.pt
+
+# 字の数(省略時は生成物・実在字それぞれ1万字)と軌跡の数(省略時は64本)を減らして、手早く確かめる
+$ uv run scripts/evaluate_glyph_gan.py --checkpoint <チェックポイント> --samples 1000 --walks 4
+
+# 文字認識のモデル・実在字のデータ・乱数の種を指定する
+$ uv run scripts/evaluate_glyph_gan.py --checkpoint <チェックポイント> --classifier <文字認識のモデルの重み> --data <学習データ> --seed 1
+
+# 学習したチェックポイントの生成器を、data/onnx/glyph_generator.onnxへ書き出す(推論には移動平均の版の重みを使う)。
+# 入力はsimplex noiseの値で、正規分布への変換 → 写像ネットワーク → 生成器 → インクの画像。
+# 書き出したあと、同じ入力でPyTorchとONNX Runtimeの出力を比べる
+$ uv run scripts/export_glyph_onnx.py --checkpoint data/checkpoints/glyph_gan/<名前>/checkpoint_<歩数>.pt
+
+# 書き出し先を指定する
+$ uv run scripts/export_glyph_onnx.py --checkpoint <チェックポイント> --output <ONNXのパス>
 ```
 
 ## 実行手順
