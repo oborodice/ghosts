@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Network Volumeは環境再利用のため使い回す(pod削除時にも消えない)ため、古い実行のチェックポイントが残っていることがある。
-# 明示的に指定しない限り、更新時刻が最新の*.ptを対象にすることで取り違えを防ぐ
+# podの上の学習の結果(data/checkpoints/glyph_gan/<名前>/ のチェックポイントと、ログ train_<名前>.log)を、ローカルの同じ場所へ落とす。
+# 落としたあと、ファイルの数と中身(SHA-256)をpodの上と比べ、すべて一致したときだけpodの上のチェックポイントを消す
+# (Network Volumeの容量を空けるため。一致しなければ消さずに止まる)。podを消す前に必ず実行する
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
 
 usage() {
-  echo "Usage: $0 <ip> <port> [remote-checkpoint-name|latest] [local-name] [--remote-dir <path>]" >&2
-  echo "  --remote-dir: download from a path other than ${DEFAULT_REMOTE_DIR} (see runpod_deploy_code.sh" >&2
-  echo "  --remote-dir, for a config deployed alongside others on one pod)" >&2
+  echo "Usage: $0 <ip> <port> --name <run-name> [--keep-remote] [--remote-dir <path>]" >&2
+  echo "  --name: the run to download (the name given to runpod_launch_training.sh)" >&2
+  echo "  --keep-remote: do not delete the checkpoints on the pod after a verified download" >&2
+  echo "  --remote-dir: download from a path other than ${DEFAULT_REMOTE_DIR} (see runpod_deploy_code.sh --remote-dir)" >&2
   exit 1
 }
 
@@ -22,55 +24,46 @@ POD_PORT="$2"
 shift 2
 
 REMOTE_DIR="${DEFAULT_REMOTE_DIR}"
-REMOTE_NAME="latest"
-LOCAL_NAME=""
-POSITIONAL_INDEX=0
-
+RUN_NAME=""
+KEEP_REMOTE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --remote-dir)
-      [ "$#" -ge 2 ] || usage
-      REMOTE_DIR="$2"
-      shift 2
-      ;;
-    *)
-      if [ "${POSITIONAL_INDEX}" -eq 0 ]; then
-        REMOTE_NAME="$1"
-      elif [ "${POSITIONAL_INDEX}" -eq 1 ]; then
-        LOCAL_NAME="$1"
-      else
-        usage
-      fi
-      POSITIONAL_INDEX=$((POSITIONAL_INDEX + 1))
-      shift
-      ;;
+    --name) [ "$#" -ge 2 ] || usage; RUN_NAME="$2"; shift 2 ;;
+    --keep-remote) KEEP_REMOTE="1"; shift ;;
+    --remote-dir) [ "$#" -ge 2 ] || usage; REMOTE_DIR="$2"; shift 2 ;;
+    *) usage ;;
   esac
 done
+[ -n "${RUN_NAME}" ] || usage
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOCAL_CHECKPOINT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/data/checkpoints"
+LOCAL_RUN_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)/data/checkpoints/glyph_gan/${RUN_NAME}"
+REMOTE_RUN_DIR="${REMOTE_DIR}/data/checkpoints/glyph_gan/${RUN_NAME}"
+SSH=(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -p "${POD_PORT}" "root@${POD_IP}")
+SCP=(scp -i "${SSH_KEY}" -o StrictHostKeyChecking=no -P "${POD_PORT}")
 
-if [ "${REMOTE_NAME}" = "latest" ]; then
-  REMOTE_NAME="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
-    "ls -t ${REMOTE_DIR}/data/checkpoints/vae_*.pt | grep -v _resume.pt | head -1 | xargs basename")"
-  echo "Latest checkpoint: ${REMOTE_NAME}"
+mkdir -p "$(dirname "${LOCAL_RUN_DIR}")"
+# 学習の名前のディレクトリをまるごと、ローカルの同じ名前のディレクトリへ落とす
+"${SCP[@]}" -r "root@${POD_IP}:${REMOTE_RUN_DIR}" "$(dirname "${LOCAL_RUN_DIR}")/"
+"${SCP[@]}" "root@${POD_IP}:${REMOTE_DIR}/train_${RUN_NAME}.log" "${LOCAL_RUN_DIR}/train.log"
+
+# podの上にあるチェックポイントだけを、ローカルの同じ名前のファイルと比べる(前に落として、podの上からは消した分がローカルに残っていてもよい)
+# (チェックポイントがないときは何も出さない。sha256sum に存在しない *.pt を渡してエラーで止まらないように)
+REMOTE_SUMS="$("${SSH[@]}" "cd ${REMOTE_RUN_DIR} && ls *.pt >/dev/null 2>&1 && sha256sum *.pt || true" | awk '{print $1, $2}' | sort)"
+if [ -z "${REMOTE_SUMS}" ]; then
+  echo "Error: no checkpoints found in ${REMOTE_RUN_DIR} on the pod" >&2
+  exit 1
 fi
-
-scp -i "${SSH_KEY}" -P "${POD_PORT}" \
-  root@"${POD_IP}":"${REMOTE_DIR}/data/checkpoints/${REMOTE_NAME}" "${LOCAL_CHECKPOINT_DIR}/"
-# ログはチェックポイントと同じディレクトリ(gitignore済み)に、対応する名前で残す
-scp -i "${SSH_KEY}" -P "${POD_PORT}" \
-  root@"${POD_IP}":"${REMOTE_DIR}/train.log" "${LOCAL_CHECKPOINT_DIR}/${REMOTE_NAME%.pt}_train.log"
-
-if [ -n "${LOCAL_NAME}" ]; then
-  mv "${LOCAL_CHECKPOINT_DIR}/${REMOTE_NAME}" "${LOCAL_CHECKPOINT_DIR}/${LOCAL_NAME}"
-  mv "${LOCAL_CHECKPOINT_DIR}/${REMOTE_NAME%.pt}_train.log" "${LOCAL_CHECKPOINT_DIR}/${LOCAL_NAME%.pt}_train.log"
-  echo "Renamed to ${LOCAL_NAME}"
+REMOTE_NAMES=($(echo "${REMOTE_SUMS}" | awk '{print $2}'))
+LOCAL_SUMS="$(cd "${LOCAL_RUN_DIR}" && shasum -a 256 ${REMOTE_NAMES[@]+"${REMOTE_NAMES[@]}"} | awk '{print $1, $2}' | sort)"
+if [ "${REMOTE_SUMS}" != "${LOCAL_SUMS}" ]; then
+  echo "Error: downloaded checkpoints do not match the pod (remote checkpoints are kept)" >&2
+  diff <(echo "${REMOTE_SUMS}") <(echo "${LOCAL_SUMS}") >&2 || true
+  exit 1
 fi
+echo "Verified $(echo "${REMOTE_SUMS}" | wc -l | tr -d ' ') checkpoints in ${LOCAL_RUN_DIR}"
 
-# ダウンロードが成功した(setの-eによりここまで来た時点でscpは両方成功している)ことを確認できたので、
-# Network Volume上の*.pt(このディレクトリの全実行分、resume用含む)を削除してクォータを空ける。
-# 使い回すpod上に複数世代のチェックポイントが積み上がり20GBクォータを超過する事故が繰り返し起きていたため
-echo "Cleaning up remote checkpoints in ${REMOTE_DIR}/data/checkpoints ..."
-ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
-  "rm -f ${REMOTE_DIR}/data/checkpoints/*.pt"
+if [ -z "${KEEP_REMOTE}" ]; then
+  echo "Cleaning up remote checkpoints in ${REMOTE_RUN_DIR} ..."
+  "${SSH[@]}" "rm -f ${REMOTE_RUN_DIR}/*.pt"
+fi

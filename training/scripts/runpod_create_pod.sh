@@ -1,80 +1,106 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Network Volumeのデータセンターとpodのデータセンターは一致している必要があるため、volume-id から
-# 自動で引く(利用者にデータセンターIDを別途調べさせない)
+# RunPodのpodを1つ作り、SSHで入れることと、ホストのCPUの速さを確かめる。
+# Network Volumeは指定したときだけ使う。Network Volumeはデータセンターに固定されるので、そのデータセンターのGPUに空きが
+# ないとpodを作れない。指定しなければpod自身のディスク(podを消すと中身も消える)を使い、空きのあるデータセンターを
+# RunPodに選ばせる(その場合、結果はpodを消す前に runpod_download_results.sh で必ず落とす)。
+# 課金が発生するので、作れなかったときに別の条件で作り直すのは、pod の一覧(runpodctl pod list)を確かめてから1回ずつ行う
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 TEMPLATE_ID="runpod-torch-v280"
 DEFAULT_GPU_ID="NVIDIA GeForce RTX 4090"
+CONTAINER_DISK_GB=40
 
-if [ "$#" -lt 1 ]; then
-  echo "Usage: $0 <network-volume-id> [pod-name] [gpu-id]" >&2
-  echo "  gpu-id: defaults to '${DEFAULT_GPU_ID}'. Override when that GPU has no stock in the volume's" >&2
-  echo "  datacenter (e.g. \"NVIDIA GeForce RTX 5090\", \"NVIDIA GeForce RTX 3090\"); see 'runpodctl datacenter list'" >&2
-  echo "  for what's available where. This workload is CPU-bound (see the benchmark below), so GPU choice" >&2
-  echo "  mostly doesn't affect epoch time." >&2
+usage() {
+  echo "Usage: $0 [--volume <network-volume-id>] [--gpu <gpu-id>] [--name <pod-name>]" >&2
+  echo "  --volume: attach a Network Volume at /workspace (the pod is created in the volume's datacenter)." >&2
+  echo "    Without it the pod uses its own ${CONTAINER_DISK_GB}GB disk, which is deleted with the pod." >&2
+  echo "  --gpu: defaults to '${DEFAULT_GPU_ID}'. When it has no stock, try e.g. \"NVIDIA L40S\", \"NVIDIA A40\"" >&2
+  echo "    or \"NVIDIA GeForce RTX 3090\" (the GAN is small, so the GPU type changes speed but not results)." >&2
   exit 1
+}
+
+VOLUME_ID=""
+GPU_ID="${DEFAULT_GPU_ID}"
+POD_NAME="ghosts-$(date +%Y%m%d%H%M%S)"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --volume) [ "$#" -ge 2 ] || usage; VOLUME_ID="$2"; shift 2 ;;
+    --gpu) [ "$#" -ge 2 ] || usage; GPU_ID="$2"; shift 2 ;;
+    --name) [ "$#" -ge 2 ] || usage; POD_NAME="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+
+STORAGE_ARGS=(--container-disk-in-gb "${CONTAINER_DISK_GB}")
+if [ -n "${VOLUME_ID}" ]; then
+  DATA_CENTER_ID="$(runpodctl network-volume list | jq -r --arg id "${VOLUME_ID}" '.[] | select(.id == $id) | .dataCenterId')"
+  if [ -z "${DATA_CENTER_ID}" ]; then
+    echo "Network volume ${VOLUME_ID} not found" >&2
+    exit 1
+  fi
+  STORAGE_ARGS+=(--data-center-ids "${DATA_CENTER_ID}" --network-volume-id "${VOLUME_ID}" --volume-mount-path "/workspace")
+  echo "Creating pod '${POD_NAME}' (${GPU_ID}) on volume ${VOLUME_ID} (datacenter ${DATA_CENTER_ID}) ..."
+else
+  echo "Creating pod '${POD_NAME}' (${GPU_ID}) without a Network Volume ..."
 fi
 
-VOLUME_ID="$1"
-POD_NAME="${2:-ghosts-$(date +%Y%m%d%H%M%S)}"
-GPU_ID="${3:-${DEFAULT_GPU_ID}}"
-
-DATA_CENTER_ID="$(runpodctl network-volume list | jq -r --arg id "${VOLUME_ID}" '.[] | select(.id == $id) | .dataCenterId')"
-if [ -z "${DATA_CENTER_ID}" ]; then
-  echo "Network volume ${VOLUME_ID} not found" >&2
+POD_JSON="$(runpodctl pod create --template-id "${TEMPLATE_ID}" --gpu-id "${GPU_ID}" --cloud-type SECURE \
+  "${STORAGE_ARGS[@]}" --ports "22/tcp" --name "${POD_NAME}" --wait 2>&1 || true)"
+# --wait の出力は、先頭にsshを待つ進み具合の行があり、そのあとにpodのJSONが続く。JSONの部分だけを読む
+# (全体をJSONとして読むと、作れていても読み取りに失敗し、作れなかったと誤って判定する)
+POD_JSON="$(echo "${POD_JSON}" | sed -n '/^{/,$p')"
+POD_ID="$(echo "${POD_JSON}" | jq -r '.id // empty' 2>/dev/null || true)"
+if [ -z "${POD_ID}" ]; then
+  echo "Pod was not created: $(echo "${POD_JSON}" | tail -1)" >&2
+  echo "Current pods (check before trying again):" >&2
+  runpodctl pod list >&2
   exit 1
 fi
-
-echo "Creating pod '${POD_NAME}' on volume ${VOLUME_ID} (datacenter ${DATA_CENTER_ID}) ..."
-POD_JSON="$(runpodctl pod create \
-  --template-id "${TEMPLATE_ID}" \
-  --gpu-id "${GPU_ID}" \
-  --cloud-type SECURE \
-  --data-center-ids "${DATA_CENTER_ID}" \
-  --network-volume-id "${VOLUME_ID}" \
-  --volume-mount-path "/workspace" \
-  --ports "22/tcp" \
-  --name "${POD_NAME}" \
-  --wait)"
-
-POD_ID="$(echo "${POD_JSON}" | jq -r '.id')"
 POD_IP="$(echo "${POD_JSON}" | jq -r '.ssh.ip')"
 POD_PORT="$(echo "${POD_JSON}" | jq -r '.ssh.port')"
+SSH=(ssh -n -i "${SSH_KEY}" -o StrictHostKeyChecking=no -p "${POD_PORT}" "root@${POD_IP}")
 
-# マウントパスが想定通りにならないケースが過去にあったため(コンテナのエフェメラルディスクに
-# 書き込んでしまい、pod終了時に消える)、Network Volumeとして実際にマウントされているか確認する
-MOUNT_CHECK="$(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" "df -h /workspace")"
-if ! echo "${MOUNT_CHECK}" | grep -q "runpod.net"; then
-  echo "Error: /workspace does not look like a Network Volume mount (pod_id=${POD_ID}):" >&2
-  echo "${MOUNT_CHECK}" >&2
-  exit 1
+if [ -n "${VOLUME_ID}" ]; then
+  # マウントパスが想定と違うと、コンテナのエフェメラルディスクに書き込んでしまい、pod終了時に消えるので、
+  # Network Volumeとして実際にマウントされているか確認する
+  if ! "${SSH[@]}" "df -h /workspace" | grep -q "runpod.net"; then
+    echo "Error: /workspace does not look like a Network Volume mount (pod_id=${POD_ID})" >&2
+    exit 1
+  fi
 fi
 
 echo "pod_id=${POD_ID}"
 echo "ip=${POD_IP}"
 echo "port=${POD_PORT}"
 
-# このワークロードはGPUよりシングルスレッドCPU性能がボトルネックになりやすいことが分かっている
-# (RTX 4090・128vCPU・低クロックのAMD EPYCホストで1エポックが約68秒、RTX 4090・24コアのAMD
-# Threadripperホストでは約26秒)。コード転送前にシステムのPython(venv不要)で軽い計算ベンチマークを
-# 走らせ、遅いホストに当たったかを早期に判定する。目安: このループが1秒未満なら当たり(実測0.91秒で
-# 26秒/エポック)、10秒を超えるようならハズレ(実測13.10秒で68秒/エポック)。ハズレの場合はterminateして
-# 作り直すか、在庫の多い別のデータセンターを試す(Network Volumeはデータセンター固定のため、切り替える
-# 場合は新しいVolumeの作成が必要)。
-# nprocはコンテナから見えるホスト全体のコア数を返すだけで、実際にこのpodへ割り当てられたCPU予算
-# (cgroup制限)とは一致しない(実測: nproc=48/120のpodが、実際は/sys/fs/cgroup/cpu.maxベースで
-# 約13コアしかなかった)。1つのpodに複数構成を並列実行する(runpod_deploy_code.sh --remote-dir)際は
-# nprocではなくこちらの数値を並列数の目安にする
-ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no root@"${POD_IP}" -p "${POD_PORT}" \
-  "nproc; lscpu | grep -iE 'model name|mhz'; python3 -c 'import time; s = time.time(); x = 0
+# 学習の速さは、GPUよりホストのCPUの1スレッドの速さで決まりやすい(小さな計算を1つずつGPUに投げる手間が大きいため)。
+# 同じGPUの機種でもホストによって違うので、軽い計算で確かめる。目安: このループが1秒前後なら速いホスト、2秒を超えると遅め。
+# nprocはホスト全体のコア数を返すだけで、このpodに割り当てられたCPU(cgroupの制限)とは違うので、cgroupの値を見る
+ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -p "${POD_PORT}" "root@${POD_IP}" bash -s <<'EOF'
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+python3 - <<'PY'
+import time
+started = time.time()
+x = 0
 for i in range(20_000_000):
     x += i
-print(f\"single-thread loop: {time.time() - s:.2f}s\")'
-echo -n 'actual cgroup CPU budget: '
+print(f"single-thread loop: {time.time() - started:.2f}s")
+PY
+# ホストによって、cgroup v2(cpu.max)と v1(cpu.cfs_quota_us。制限なしは -1)のどちらかになる
+echo -n "actual cgroup CPU budget: "
 if [ -f /sys/fs/cgroup/cpu.max ]; then
   read -r quota period < /sys/fs/cgroup/cpu.max
-  if [ \"\${quota}\" = max ]; then echo unlimited; else python3 -c \"print(f'{\${quota}/\${period}:.1f} vCPU')\"; fi
+elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+  quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us); period=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
 else
-  python3 -c \"q=open('/sys/fs/cgroup/cpu/cpu.cfs_quota_us').read().strip(); p=open('/sys/fs/cgroup/cpu/cpu.cfs_period_us').read().strip(); print('unlimited' if int(q)<0 else f'{int(q)/int(p):.1f} vCPU')\"
-fi"
+  quota=""
+fi
+if [ -z "${quota}" ]; then
+  echo unknown
+elif [ "${quota}" = max ] || [ "${quota}" = -1 ]; then
+  echo unlimited
+else
+  awk -v q="${quota}" -v p="${period}" 'BEGIN { printf "%.1f vCPU\n", q / p }'
+fi
+EOF

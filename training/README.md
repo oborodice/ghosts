@@ -202,61 +202,54 @@ $ uv run scripts/sweep_vae_v2.py
 
 ## RunPodへのデプロイ
 
-- 外部GPU( [RunPod](https://www.runpod.io/) 、RTX 4090)でフルスケール学習を実行するためのスクリプト
-- 初回のみ、RunPodアカウントの作成、 `runpodctl` のセットアップ(APIキー・SSH鍵)、Network Volumeの作成が別途必要
+- 外部GPU( [RunPod](https://www.runpod.io/) )でGANの学習(scripts/train_glyph_gan.py)を実行するためのスクリプト
+- 初回のみ、RunPodアカウントの作成、 `runpodctl` のセットアップ(APIキー・SSH鍵)が別途必要(Network Volumeを使う場合はその作成も)
+- podの作成は課金が発生するので1つずつ行い、作れなかったときは `runpodctl pod list` で作られていないことを確かめてから、条件を変えて作り直す
 
 ```sh
-# pod作成(Network Volume ID指定)。SSH接続確認・マウント確認まで行い、pod_id/ip/portを表示する。
-# GPU機種が同じでもCPU側の当たり外れがあるため、シングルスレッドの簡易ベンチマークも実行する
-$ ./scripts/runpod_create_pod.sh <network-volume-id> [pod-name] [gpu-id]
-$ ./scripts/runpod_create_pod.sh <network-volume-id>
-# GPU機種を指定する(省略時はRTX 4090。在庫切れの場合に使う。このワークロードはCPUがボトルネックの
-# ため、機種を変えてもエポック時間はほぼ変わらない)
-$ ./scripts/runpod_create_pod.sh <network-volume-id> ghosts-a "NVIDIA RTX PRO 4000 Blackwell"
+# pod作成。SSH接続の確認と、ホストのCPUの速さの簡易ベンチマーク(学習の速さはCPU側で決まりやすく、同じGPUの
+# 機種でもホストによって違う)まで行い、pod_id/ip/portを表示する。Network Volumeを使わない場合は、pod自身の
+# ディスク(podを消すと中身も消える)を使い、空きのあるデータセンターをRunPodに選ばせる
+$ ./scripts/runpod_create_pod.sh [--volume <network-volume-id>] [--gpu <gpu-id>] [--name <pod-name>]
+$ ./scripts/runpod_create_pod.sh
+# GPU機種を指定する(省略時はRTX 4090。在庫切れの場合に使う)
+$ ./scripts/runpod_create_pod.sh --gpu "NVIDIA L40S"
+# Network Volumeを/workspaceに付ける(そのVolumeのデータセンターで作るので、GPUの空きがないと作れないことがある)
+$ ./scripts/runpod_create_pod.sh --volume <network-volume-id>
 
-# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncする。
-# このワークロードはGPUを数%しか使わないため、1つのpodに複数構成を同時に置いて並列実行できる。
-# ただしCPUは1プロセスあたり約3〜4コアを使う(大容量の構成での実測)ため、並列数はpodのCPUの上限
-# (nprocではなく/sys/fs/cgroup/cpu.maxで確認する)で決まる
-$ ./scripts/runpod_deploy_code.sh <ip> <port> [--with-data] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]
+# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncして、CUDAが使えるかを確かめる
+$ ./scripts/runpod_deploy_code.sh <ip> <port> [--data <file>] [--classifier <file>] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]
 $ ./scripts/runpod_deploy_code.sh <ip> <port>
-# データも送る(初回のみ)
-$ ./scripts/runpod_deploy_code.sh <ip> <port> --with-data
+# 学習データ(training/data/配下のファイル)も送る(初回のみ)
+$ ./scripts/runpod_deploy_code.sh <ip> <port> --data glyphs_64.npz
+# 学習中に種類の数を測る文字認識のモデルの重み(training/data/配下のファイル)も送る
+$ ./scripts/runpod_deploy_code.sh <ip> <port> --data glyphs_64.npz --classifier <文字認識のモデルの重み>
 # 本番のtraining/scripts以外(アブレーション用のスクラッチコピーなど)を送る
 $ ./scripts/runpod_deploy_code.sh <ip> <port> --source <local-dir>
-# 同じpodに、別の配置先として並べて置く(配置先ごとにdata/を持つため--with-dataも必要)。
+# 同じpodに、別の配置先として並べて置く(配置先ごとにdata/を持つため--dataも必要)。
 # 既に同期済みの配置先の.venvをシンボリックリンクすれば、依存関係が同じなら再ダウンロードなしで済む
-$ ./scripts/runpod_deploy_code.sh <ip> <port> --with-data --remote-dir /workspace/ghosts/training_b --link-venv /workspace/ghosts/training
+$ ./scripts/runpod_deploy_code.sh <ip> <port> --data glyphs_64.npz --remote-dir /workspace/ghosts/training_b --link-venv /workspace/ghosts/training
 
-# 学習をnohup+disownでバックグラウンド起動する
-$ ./scripts/runpod_launch_training.sh <ip> <port> [remote-resume-path] [--remote-dir <path>] [--train-args "<args>"]
-$ ./scripts/runpod_launch_training.sh <ip> <port>
-# 中断した学習を再開する
-$ ./scripts/runpod_launch_training.sh <ip> <port> /workspace/ghosts/training/data/checkpoints/vae_<timestamp>_resume.pt
-# 別の配置先(runpod_deploy_code.shの--remote-dir)で起動する
-$ ./scripts/runpod_launch_training.sh <ip> <port> --remote-dir /workspace/ghosts/training_b
-# train_vae_v2.pyに渡す追加の引数を、1つの文字列にまとめて指定する
-$ ./scripts/runpod_launch_training.sh <ip> <port> --train-args "--max-epochs 40"
+# 学習をバックグラウンドで始める(SSHを切っても止まらない)。ログは学習の名前ごとにtrain_<名前>.logへ書くので、
+# 1つのpodで複数の学習を同時に回せる
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> [--resume] [--remote-dir <path>] [--train-args "<args>"]
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前>
+# train_glyph_gan.pyに渡す追加の引数を、1つの文字列にまとめて指定する
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --train-args "--kimg 960 --seed 1"
+# 止まった学習を、最新のチェックポイントから続ける
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --resume
 
-# 学習プロセスが動いているか・train.logの直近n行を確認する(train.logはNetwork Volume単位で
-# 永続化されるため、プロセスが動いていないのに前回の内容が表示されることがある点に注意)
-$ ./scripts/runpod_check_progress.sh <ip> <port> [n-lines] [--remote-dir <path>]
-$ ./scripts/runpod_check_progress.sh <ip> <port>
+# 学習が動いているか・ログの直近n行・最新の指標(スタイルの散らばり、崩れの割合など)を確認する
+$ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> [--lines <n>] [--remote-dir <path>]
+$ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前>
 # 表示する行数を指定する
-$ ./scripts/runpod_check_progress.sh <ip> <port> 50
-# 別の配置先を確認する
-$ ./scripts/runpod_check_progress.sh <ip> <port> --remote-dir /workspace/ghosts/training_b
+$ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> --lines 50
 
-# チェックポイント・train.logをダウンロードする。
-# ダウンロード成功後、Network Volume上の当該ディレクトリの*.ptを全て削除してクォータを空ける
-# (podを使い回すたびに複数世代のチェックポイントが積み上がりクォータ超過する事故を防ぐため)
-$ ./scripts/runpod_download_results.sh <ip> <port> [remote-checkpoint-name|latest] [local-name] [--remote-dir <path>]
-# 最新のチェックポイントを取得する
-$ ./scripts/runpod_download_results.sh <ip> <port>
-# 最新のチェックポイントを、ローカルでの名前を指定して取得する
-$ ./scripts/runpod_download_results.sh <ip> <port> latest vae_v2_<name>.pt
-# 別の配置先から取得する
-$ ./scripts/runpod_download_results.sh <ip> <port> latest vae_v2_<name>.pt --remote-dir /workspace/ghosts/training_b
+# 学習の結果(チェックポイントのディレクトリとログ)を、ローカルのdata/checkpoints/glyph_gan/<名前>/へ落とす。
+# ファイルの数と中身(SHA-256)をpodの上と比べ、すべて一致したときだけpodの上のチェックポイントを消す。
+# podを消す前に必ず実行する(Network Volumeを使わないpodでは、podを消すと中身も消えるため)
+$ ./scripts/runpod_download_results.sh <ip> <port> --name <名前> [--keep-remote] [--remote-dir <path>]
+$ ./scripts/runpod_download_results.sh <ip> <port> --name <名前>
 
 # podを削除して課金を止める(Network Volumeは残る)
 $ ./scripts/runpod_terminate.sh <pod-id>
