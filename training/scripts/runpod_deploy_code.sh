@@ -3,7 +3,7 @@ set -euo pipefail
 
 # コード(scripts・pyproject.toml・uv.lock)は変わるたびに毎回送る想定のため常に送る。
 # 学習データ(build_glyph_dataset.py で作った data/glyphs_<解像度>.npz)は滅多に変わらないため、指定したときだけ送る。
-# 学習中に種類の数を測る文字認識のモデルの重みも、指定したときだけ送る。
+# 保存ごとの評価に使う文字認識のモデルの重みも、指定したときだけ送る。
 # データはどのソースを使う場合でも実データ(本番のtraining/data/)から送る
 # (アブレーション用のスクラッチディレクトリはコードのみでデータを複製していないため)
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
@@ -75,7 +75,8 @@ if [ -n "${LINK_VENV_FROM}" ]; then
   "${SSH[@]}" "ln -sfn ${LINK_VENV_FROM}/.venv ${REMOTE_DIR}/.venv"
 else
   echo "Running uv sync ..."
-  "${SSH[@]}" "export ${UV_ENV_VARS}; cd ${REMOTE_DIR} && uv sync"
+  # 表示だけが使うパッケージ(pyproject.toml の display のグループ)は入れない(学習には要らず、pygame はpodの環境で組み立てられないため)
+  "${SSH[@]}" "export ${UV_ENV_VARS}; cd ${REMOTE_DIR} && uv sync --no-group display"
 fi
 
 echo "Checking CUDA is recognized ..."

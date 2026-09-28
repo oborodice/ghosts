@@ -5,7 +5,7 @@
 ## セットアップ
 
 ```sh
-# 依存パッケージのインストール
+# 依存パッケージのインストール(リアルタイム表示だけが使うパッケージ(pyproject.toml の display のグループ)も入る)
 $ uv sync
 
 # KanjiVG (https://kanjivg.tagaini.net/, CC BY-SA 3.0) データセットの取得
@@ -258,7 +258,7 @@ $ ./scripts/runpod_create_pod.sh --gpu "NVIDIA L40S"
 # Network Volumeを/workspaceに付ける(そのVolumeのデータセンターで作るので、GPUの空きがないと作れないことがある)
 $ ./scripts/runpod_create_pod.sh --volume <network-volume-id>
 
-# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncして、CUDAが使えるかを確かめる
+# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncして、CUDAが使えるかを確かめる(表示だけが使うパッケージは入れない)
 $ ./scripts/runpod_deploy_code.sh <ip> <port> [--data <file>] [--classifier <file>] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]
 $ ./scripts/runpod_deploy_code.sh <ip> <port>
 # 学習データ(training/data/配下のファイル)も送る(初回のみ)
