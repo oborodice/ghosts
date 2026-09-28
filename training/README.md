@@ -37,6 +37,29 @@ $ uv run scripts/build_glyph_dataset.py
 # 解像度を変える(省略時は64)
 $ uv run scripts/build_glyph_dataset.py --resolution 128
 
+# 学習データ(data/glyphs_64.npz)でGAN(写像ネットワーク・生成器・判別器、scripts/glyph_gan.py)を学習し、
+# data/checkpoints/glyph_gan/<名前>/checkpoint_<歩数>.ptへ保存する。チェックポイントには、推論に使う移動平均の版の重みと、
+# 再開に使う最適化の状態も入る。既定の設定は、同じ字ばかり出る崩壊と長い学習での崩れを避けるために確かめた構成
+# (ロジスティック損失、判別器の学習率=生成器、写像ネットワークの学習率の倍率0.01、強い勾配の罰則、左右反転なしの増強)。
+# 学習中は、スタイルの散らばりと崩れ(外周の枠・白黒の反転・塗りつぶし)の割合を定期的に表示する。
+# GPU(CUDA)、Apple Silicon(MPS)、CPUの順に使えるものを使う
+$ uv run scripts/train_glyph_gan.py --name <名前>
+
+# 学習の長さ(千枚単位、省略時は1920 = バッチ64で3万歩)と乱数の種を指定する
+$ uv run scripts/train_glyph_gan.py --name <名前> --kimg 960 --seed 1
+
+# 途中で止まった学習を、同じ名前の最新のチェックポイントから続ける(上書きした設定も、保存した値に戻る)
+$ uv run scripts/train_glyph_gan.py --name <名前> --resume
+
+# 学習の設定(スクリプトの冒頭の定数)を、この学習だけ変える(スイープ用。何度でも指定できる。使った値はチェックポイントに残る)
+$ uv run scripts/train_glyph_gan.py --name <名前> --override LEARNING_RATE=1e-4 --override CAPACITY=16
+
+# 学習中に、文字認識のモデルで2字の種類の数(同じ字ばかり出る崩壊の目安)も表示する
+$ uv run scripts/train_glyph_gan.py --name <名前> --classifier <文字認識のモデルの重み>
+
+# 別の解像度の学習データで学習する(省略時はdata/glyphs_64.npz)
+$ uv run scripts/train_glyph_gan.py --name <名前> --data data/glyphs_128.npz
+
 # 生成した字の評価の物差しにする文字認識のモデルを学習し、data/glyph_classifier.ptへ保存する。
 # 3書風を学習から外し、見たことのない書風でも読めるかを確かめる。学習のあと、実在字で特徴の距離の分布を測り、
 # 評価に使うしきい値(同じ種類の字とみなす距離、別の字への急な切り替わりとみなす距離)も一緒に保存する
@@ -245,6 +268,8 @@ $ ./scripts/runpod_terminate.sh <pod-id>
 
 | 対象 | ライセンス | 利用箇所 |
 |---|---|---|
+| [lucidrains/stylegan2-pytorch](https://github.com/lucidrains/stylegan2-pytorch) の、写像ネットワーク・生成器・判別器のコード(部分的にコピーし、改変したもの) | MIT License(全文は [licenses/stylegan2-pytorch.txt](licenses/stylegan2-pytorch.txt)) | `scripts/glyph_gan.py` |
+| [DiffAugment](https://github.com/mit-han-lab/data-efficient-gans) の増強(位置ずれ・切り抜き)(コードは含まず、同じ動きになるよう書き直したもの) | BSD 2-Clause License | `scripts/train_glyph_gan.py` |
 | [Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外) | SIL Open Font License 1.1 | 学習データ(`scripts/download_fonts.py` で取得) |
 | Google Fonts の2書風(Kosugi・Kosugi Maru) | Apache License 2.0 | 学習データ(同上) |
 
