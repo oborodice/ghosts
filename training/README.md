@@ -36,6 +36,14 @@ $ uv run scripts/build_glyph_dataset.py
 
 # 解像度を変える(省略時は64)
 $ uv run scripts/build_glyph_dataset.py --resolution 128
+
+# 生成した字の評価の物差しにする文字認識のモデルを学習し、data/glyph_classifier.ptへ保存する。
+# 3書風を学習から外し、見たことのない書風でも読めるかを確かめる。学習のあと、実在字で特徴の距離の分布を測り、
+# 評価に使うしきい値(同じ種類の字とみなす距離、別の字への急な切り替わりとみなす距離)も一緒に保存する
+$ uv run scripts/train_glyph_classifier.py
+
+# 学習データと保存先を指定する
+$ uv run scripts/train_glyph_classifier.py --data data/glyphs_128.npz --output data/glyph_classifier_128.pt
 ```
 
 ## 実行手順
