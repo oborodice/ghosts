@@ -254,7 +254,7 @@ $ uv run scripts/sweep_vae_v2.py
 
 ## RunPodへのデプロイ
 
-- 外部GPU( [RunPod](https://www.runpod.io/) )でGANの学習(scripts/train_glyph_gan.py)を実行するためのスクリプト
+- 外部GPU( [RunPod](https://www.runpod.io/) )でGANの学習(scripts/train_glyph_gan.py)や、文字認識のモデルの学習・評価などを実行するためのスクリプト
 - 初回のみ、RunPodアカウントの作成、 `runpodctl` のセットアップ(APIキー・SSH鍵)が別途必要(Network Volumeを使う場合はその作成も)
 - podの作成は課金が発生するので1つずつ行い、作れなかったときは `runpodctl pod list` で作られていないことを確かめてから、条件を変えて作り直す
 
@@ -283,19 +283,31 @@ $ ./scripts/runpod_deploy_code.sh <ip> <port> --source <local-dir>
 $ ./scripts/runpod_deploy_code.sh <ip> <port> --data glyphs_64.npz --remote-dir /workspace/ghosts/training_b --link-venv /workspace/ghosts/training
 
 # 学習をバックグラウンドで始める(SSHを切っても止まらない)。ログは学習の名前ごとにtrain_<名前>.logへ書くので、
-# 1つのpodで複数の学習を同時に回せる
-$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> [--resume] [--remote-dir <path>] [--train-args "<args>"]
+# 1つのpodで複数の学習を同時に回せる(中身は runpod_launch_job.sh で、ジョブの名前を train_<名前> にして起動する)
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> [--resume] [--remote-dir <path>] [-- <train_glyph_gan.pyの引数>...]
 $ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前>
-# train_glyph_gan.pyに渡す追加の引数を、1つの文字列にまとめて指定する
-$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --train-args "--kimg 960 --seed 1"
-# 止まった学習を、最新のチェックポイントから続ける
+# train_glyph_gan.pyに渡す追加の引数を、-- のあとにそのまま並べる(空白を含む値も、引用符で囲めばそのまま渡る)
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> -- --kimg 960 --seed 1 --classifier data/glyph_classifier.pt
+# 止まった学習を、最新のチェックポイントから続ける(ログには追記する)。学習の量を増やして続ければ、学習を延ばせる
 $ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --resume
+$ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --resume -- --classifier data/glyph_classifier.pt --kimg 2560
 
-# 学習が動いているか・ログの直近n行・最新の指標(スタイルの散らばり、崩れの割合など)・最新の評価(--classifier を指定したとき)を確認する
-$ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> [--lines <n>] [--remote-dir <path>]
+# 学習以外のスクリプト(文字認識のモデルの学習・評価など)を、ジョブの名前をつけてバックグラウンドで始める。
+# ログは<ジョブの名前>.log、プロセスの番号は<ジョブの名前>.pidへ書き、終わるとログの最後に「exit code <n>」を足す
+$ ./scripts/runpod_launch_job.sh <ip> <port> --job <ジョブの名前> [--append] [--remote-dir <path>] -- <スクリプト> [引数...]
+$ ./scripts/runpod_launch_job.sh <ip> <port> --job train_classifier -- scripts/train_glyph_classifier.py
+$ ./scripts/runpod_launch_job.sh <ip> <port> --job evaluate -- scripts/evaluate_glyph_gan.py --checkpoint <チェックポイント> --csv <CSVのパス>
+
+# 学習が動いているか(終わっていれば終了コード)・ログの直近n行・最新の指標(スタイルの散らばり、崩れの割合など)・
+# 最新の評価(--classifier を指定したとき)を確認する
+$ ./scripts/runpod_check_progress.sh <ip> <port> (--name <名前> | --job <ジョブの名前>) [--lines <n>] [--follow [--interval <秒>]] [--remote-dir <path>]
 $ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前>
 # 表示する行数を指定する
 $ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> --lines 50
+# 学習以外のジョブ(runpod_launch_job.sh で始めたもの)を確認する
+$ ./scripts/runpod_check_progress.sh <ip> <port> --job <ジョブの名前>
+# 終わるまで新しい行を流し続け、ジョブの終了コードで終わる(学習は評価・終わり・失敗の行だけ、ほかのジョブはすべての行)
+$ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> --follow
 
 # 学習の結果(チェックポイント・スナップショット・評価の値のディレクトリとログ)を、ローカルのdata/checkpoints/glyph_gan/<名前>/へ落とす。
 # ファイルの数と中身(SHA-256)をpodの上と比べ、すべて一致したときだけpodの上のチェックポイントとスナップショットを消す。
