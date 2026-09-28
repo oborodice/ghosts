@@ -8,10 +8,6 @@
 # 依存パッケージのインストール(リアルタイム表示だけが使うパッケージ(pyproject.toml の display のグループ)も入る)
 $ uv sync
 
-# KanjiVG (https://kanjivg.tagaini.net/, CC BY-SA 3.0) データセットの取得
-# data/kanjivg/配下にSVGファイルが展開される(取得済みの場合は再ダウンロードをスキップする)
-$ ./scripts/download_kanjivg.sh
-
 # 学習データ(フォントで描いた漢字の画像)に使う27書風のフォント(Google Fonts、OFL / Apache License 2.0)の取得
 # data/fonts/配下に、フォントと各ファミリーのライセンスのファイルが置かれる。取得元のコミットを固定し、
 # 各フォントをgitのblobの識別子で照合する(照合済みのファイルがある場合は再ダウンロードをスキップする)
@@ -22,7 +18,7 @@ $ uv run scripts/download_fonts.py
 $ brew install jq
 ```
 
-## 実行手順(フォントで描いた漢字の画像で学習するGAN)
+## 実行手順
 
 ```sh
 # 27書風のフォントで、各フォントが持っている漢字をすべて1字ずつ描き、data/glyphs_<解像度>.npzへ保存する
@@ -119,89 +115,6 @@ $ uv run scripts/run_glyph_onnx.py --record <mp4のパス> --seconds 30
 
 # ウィンドウを出さずに、10秒ぶんをGIFに書き出す(字の正方形だけを350pxで)
 $ uv run scripts/run_glyph_onnx.py --record <GIFのパス> --seconds 10
-```
-
-## 実行手順
-
-```sh
-# ダウンロードしたSVGのストロークデータを、いくつかの漢字を選んで可視化する
-$ uv run scripts/view_kanji.py
-
-# 各漢字のストロークを、接続されている端点同士をクリークでクラスタ化した「頂点」テーブルと、
-# 頂点ペアを参照する「ストローク」テーブルに変換し、data/stroke_features_v2.npzへ保存する
-# (同じ頂点を参照するストローク同士は必ず接続している、という保証をデータ構造として持たせるための
-# 表現。漢字以外のグリフ(ひらがな・カタカナ等)と、同じ字の字形バリアントのファイル(楷書の字形・書き順違い等)は
-# 除外する)
-$ uv run scripts/extract_stroke_features_v2.py
-
-# 頂点+ストローク全体(頂点座標のビン分類cross entropy+existence BCE+ストロークのポインタ分類cross entropy+
-# オフセットMSE+existence BCE+KL)でVAEを学習する。保存先は既存ファイルとの衝突を避けるため起動時刻ベースの
-# ファイル名(data/checkpoints/vae_<timestamp>.pt)になる(他のスクリプトが読むvae_v2.ptを
-# 更新する場合は、確認の上で手動でコピー・リネームする)
-$ uv run scripts/train_vae_v2.py
-# 学習するエポック数の上限を変える(動作確認などで、早期終了を待たずに短く止めたい場合)
-$ uv run scripts/train_vae_v2.py --max-epochs 40
-# 途中で落ちた学習を、同時に保存される<出力先>_resume.ptから再開する
-$ uv run scripts/train_vae_v2.py --resume data/checkpoints/vae_<timestamp>_resume.pt
-
-# 学習済みモデル(vae_v2.pt)の品質を数値で確認する
-# (再構成側の損失の内訳(学習と同じ関数で計算した、重みを掛ける前の値。混ぜ合わせたzの損失は含まない)、
-# 潜在次元ごとのKLの要約、重みの健全性、validation全体の誤差分布(頂点の標準化スケール・実座標スケール、
-# ストロークのポインタ分類精度・オフセットMSE)、丸暗記していないかの確認、頂点の重複スロットの検出)
-$ uv run scripts/evaluate_vae_v2.py
-# 評価対象のVAEチェックポイントを指定する(省略時は既定のチェックポイント。`--checkpoint`を持つ他のスクリプトも同じ)
-$ uv run scripts/evaluate_vae_v2.py --checkpoint data/checkpoints/<name>.pt
-
-# validationサンプルの元データと再構成結果(model.decode(mu))をストロークの曲線として並べて目視確認する。
-# 典型的な4字に加え、頂点の再構成誤差が最悪だった字も表示する
-$ uv run scripts/visualize_reconstruction_v2.py
-
-# 生成(事前分布サンプル+LatentSampler)時の孤立率・3本以上合流・交差・角度の
-# 自然さ・offset分散・ストローク長・ストローク数・キャンバス占有率を、実データ・reconstructionと
-# 比較できる一貫した方法で数値化する。あわせて、reconstructionの頂点再構成誤差(実スケール)、
-# 頂点の重複スロットが3本以上合流のカウントを狂わせていないか、ポインタの構造的な破綻
-# (自己ループ・幽霊参照)の頻度、生成したzのnear_dup_rate(実在字とほぼ重複している
-# 割合)・effective_k(実質何字を混ぜて作られているか)も確認する。後者2つは、合成z領域に新しい
-# 損失を試す際、目的の指標の改善がencoder表現の崩壊の副産物でないかを切り分けるための診断。
-# 生成分は、ポインタ・頂点座標を確率加重平均で選ぶソフトデコード(`GENERATION_SOFT_TEMPERATURE`)で作る
-$ uv run scripts/report_generation_stats_v2.py
-$ uv run scripts/report_generation_stats_v2.py --checkpoint data/checkpoints/<name>.pt
-
-# 生成した字の、ストローク数の分布・字の大きさ・実在字との近さ・構造の破綻(自己ループなど)・なめらかさを、
-# 実在字と比べて数値化する(ストローク数の分布・字の大きさなどの実在字とのWasserstein距離、実在字までの最寄り距離、
-# 自己ループなど、1字ごとの合格率(参考)、軌跡の上でのジャンプ率・ストローク数の変化)
-$ uv run scripts/report_generation_diversity_v2.py
-$ uv run scripts/report_generation_diversity_v2.py --checkpoint data/checkpoints/<name>.pt
-
-# 潜在変数をsimplex noiseで動かしたときの、生成結果のなめらかさを数値化する。フレーム間の端点のジャンプ率
-# (信頼区間つき)、zの移動距離あたりのジャンプ回数、ストロークの出現・消失の頻度を出す。
-# 生成時のソフトデコード(`GENERATION_SOFT_TEMPERATURE`)で、ノイズの周期30秒・60秒の2通りを測る
-$ uv run scripts/report_morph_smoothness_v2.py
-$ uv run scripts/report_morph_smoothness_v2.py --checkpoint data/checkpoints/<name>.pt
-
-# simplex noiseで動かした潜在変数から生成した字の変化を、アニメーションGIFとして書き出す目視確認用のツール。
-# なめらかさの診断(report_morph_smoothness_v2.py)と同じ軌跡・デコード(周期30秒)で作る。書き出し先の指定は必須
-$ uv run scripts/visualize_morph_gif_v2.py --output morph.gif
-$ uv run scripts/visualize_morph_gif_v2.py --output morph.gif --checkpoint data/checkpoints/<name>.pt
-
-# 本物/偽物を、数値特徴量ではなく実際にレンダリングした画像で判別する診断分類器。頂点+ストローク構造
-# (vae_v2.pt)の生成結果に対して使う。数値特徴量では見えている差異が、人間の視覚に近い形
-# (低解像度・軽いぼかし)でも見分けられるかを確認する
-$ uv run scripts/evaluate_generation_realism_visual_v2.py
-$ uv run scripts/evaluate_generation_realism_visual_v2.py --checkpoint data/checkpoints/<name>.pt
-# 学習した分類器を保存する(省略時は保存しない)
-$ uv run scripts/evaluate_generation_realism_visual_v2.py --save-model data/checkpoints/<classifier>.pt
-
-# evaluate_generation_realism_visual_v2.pyで`--save-model`保存した分類器が、実データ/生成結果を
-# 何を根拠に見分けているかを分析する。テストサンプルごとの分類確率と、triple_junctions・ストローク長・
-# offsetのサンプル内ばらつきといった既知指標、ストローク数・総ストローク長といった単純な交絡との
-# 相関(ピアソン相関係数)を計算する。分類器の指定は必須
-$ uv run scripts/analyze_classifier_scores_v2.py --classifier data/checkpoints/<classifier>.pt
-$ uv run scripts/analyze_classifier_scores_v2.py --classifier data/checkpoints/<classifier>.pt --checkpoint data/checkpoints/<name>.pt
-
-# 頂点のみだった段階でハイパーパラメータ候補(KLの重み・warm-up速度・潜在次元数)を複数比較したスクリプト。
-# モデルの形状(頂点+ストローク対応)が変わったため現在は実行できない
-$ uv run scripts/sweep_vae_v2.py
 ```
 
 ## RunPodへのデプロイ
