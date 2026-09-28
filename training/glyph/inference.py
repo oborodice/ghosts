@@ -43,7 +43,7 @@ class GlyphGenerator(nn.Module):
     def forward(self, simplex_values: torch.Tensor) -> torch.Tensor:
         style = self.mapping(self._gaussianize(simplex_values))
         styles = style[:, None, :].expand(-1, self.generator.num_layers, -1)
-        return self.generator(styles, self.noise_image).mean(1, keepdim=True).clamp(0, 1)
+        return self.generator(styles, self.noise_image).clamp(0, 1)
 
     def generate_in_chunks(self, simplex_values: torch.Tensor) -> torch.Tensor:
         # ONNXに書き出す forward は1字ずつ呼ぶ。評価などで多くの字を作るときはこちら
@@ -56,13 +56,10 @@ def _load_mapping_and_generator(checkpoint_path: Path, device: torch.device | st
     state = torch.load(checkpoint_path, map_location=device)
     config = state["config"]
     generator_state = state["generator_ema"]
-    # 学習は1チャンネルで行うが、ライブラリ(lucidrains/stylegan2-pytorch)で学習して写した重みは3チャンネル(RGB)なので、重みの形から読み、
-    # 出力はチャンネルの平均をインクの濃さとする
-    image_channels = generator_state["blocks.0.to_image.conv.weight"].shape[0]
     num_layers = len([key for key in generator_state if key.endswith(".conv1.weight")])
     image_size = gan.INITIAL_SIZE * 2 ** (num_layers - 1)
     mapping = gan.MappingNetwork(config["latent_dim"], config["mapping_depth"], config["mapping_learning_rate_multiplier"])
-    generator = gan.Generator(image_size, config["latent_dim"], config["capacity"], image_channels)
+    generator = gan.Generator(image_size, config["latent_dim"], config["capacity"], image_channels=1)
     mapping.load_state_dict(state["mapping_ema"])
     generator.load_state_dict(generator_state)
     return mapping, generator, config["latent_dim"]
