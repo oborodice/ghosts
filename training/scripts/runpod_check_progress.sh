@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# podの上の学習(train_glyph_gan.py)が動いているかと、ログ(train_<名前>.log)の直近の行・最新の指標を表示する
+# podの上の学習(train_glyph_gan.py)が動いているかと、ログ(train_<名前>.log)の直近の行・最新の指標・最新の評価を表示する
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
 DEFAULT_LINES=3
@@ -47,4 +47,5 @@ echo ---
 tail -n "${n_lines}" "${log}"
 echo ---
 grep 'metrics at step' "${log}" | tail -n 1
+grep 'evaluation at step' "${log}" | tail -n 1
 EOF

@@ -1,5 +1,6 @@
 # 学習したGANで字を作る推論の部分(PyTorch。ONNXへの書き出しと評価で使う)。
 # simplex noiseの値(glyph_walk.py)を正規分布に写してから、写像ネットワーク・生成器に通す
+import functools
 import math
 from pathlib import Path
 
@@ -67,6 +68,7 @@ def _load_mapping_and_generator(checkpoint_path: Path, device: torch.device | st
     return mapping, generator, config["latent_dim"]
 
 
+@functools.cache  # 作るのに約10秒かかり、中身は毎回同じなので、1回だけ作る(学習中に保存ごとに読むときなど)
 def _gaussianize_table() -> torch.Tensor:
     # 表示でノイズを作るのと同じ関数(opensimplex の noise2)を、ばらばらの位置で大量に評価する
     side = int(math.sqrt(GAUSSIANIZE_SAMPLES))

@@ -14,6 +14,7 @@
 import argparse
 import ast
 import copy
+import csv
 import math
 import random
 import time
@@ -26,10 +27,13 @@ import torch.nn.functional as F
 from torch import nn
 
 import glyph_gan
-from glyph_classifier import GlyphClassifier, load_classifier
-from glyph_metrics import artifact_rates, pair_types, pairwise_distances
+from glyph_classifier import load_classifier
+from glyph_evaluation import CSV_HEADER, GlyphEvaluator
+from glyph_inference import load_glyph_generator
+from glyph_metrics import artifact_rates, pairwise_distances
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+EVALUATION_CSV = "evaluation.csv"  # 保存ごとの評価の値の書き出し先(学習の名前のディレクトリの中)
 # 以下の大文字の名前の、数・数の組の定数は、すべて学習の設定として扱う(--override で変えられ、チェックポイントに残る)
 # モデル
 CAPACITY = 12  # 生成器・判別器の容量(Pi 5 に載る大きさ)
@@ -61,6 +65,10 @@ METRIC_SAMPLES = 512
 SAVE_EVERY = 2500
 KEEP_CHECKPOINTS = 3
 MILESTONE_EVERY = 10000  # この歩数ごとのチェックポイントは、最新でなくても残す
+# 保存ごとの評価(--classifier を指定したとき)。評価のスクリプトの既定と同じ量にし、あとで測り直した値と比べられるようにする
+EVALUATION_SAMPLES = 10000
+EVALUATION_WALKS = 64
+EVALUATION_SEED = 0
 
 
 def _parse_args() -> argparse.Namespace:
@@ -70,7 +78,7 @@ def _parse_args() -> argparse.Namespace:
     # 学習の長さ(見せる本物の画像の数、千枚単位)。バッチの大きさによらず、同じ量の学習を同じ数で指定できる。
     # 小数も受け付ける(確かめのための短い学習用。例: バッチ64で 0.64 は10歩)
     parser.add_argument("--kimg", type=float, default=1920)
-    parser.add_argument("--classifier", type=Path)  # 学習中に種類の数を測る文字認識のモデル(省略時は測らない)
+    parser.add_argument("--classifier", type=Path)  # 保存ごとにスナップショットを評価する文字認識のモデル(省略時は評価しない)
     parser.add_argument("--resume", action="store_true")  # 同じ名前の最新のチェックポイントから続ける
     parser.add_argument("--seed", type=int)
     # 定数を1回の学習だけ変える(例: --override LEARNING_RATE=1e-4)。何度でも指定できる
@@ -174,17 +182,33 @@ def _image_noise(batch: int, image_size: int, device: torch.device) -> torch.Ten
 
 @dataclass
 class _Monitor:
-    classifier: GlyphClassifier | None  # 省略時は2字の種類の数を測らない
-    same_glyph_distance: float | None  # 同じ種類とみなす特徴の距離
     reference_noise: torch.Tensor  # 指標を測るときのノイズの画像(固定する)
+    evaluator: GlyphEvaluator | None  # 保存ごとのスナップショットの評価(省略時は評価しない)
 
 
-def _build_monitor(classifier_path: Path | None, image_size: int, device: torch.device) -> _Monitor:
-    classifier, same_glyph_distance = None, None
-    if classifier_path is not None:  # train_glyph_classifier.py で学習した文字認識のモデル(同じ種類とみなす距離も一緒に入っている)
-        classifier, calibration = load_classifier(classifier_path, device)
-        same_glyph_distance = calibration.same_glyph_distance
-    return _Monitor(classifier, same_glyph_distance, _image_noise(1, image_size, device))
+def _build_monitor(classifier_path: Path | None, images: torch.Tensor, device: torch.device) -> _Monitor:
+    evaluator = None
+    if classifier_path is not None:  # train_glyph_classifier.py で学習した文字認識のモデル(しきい値も一緒に入っている)
+        # モデルを作るときの重みの初期化は、学習と同じ乱数を使う。評価の有無で学習が変わらないよう、別の乱数の流れで作る
+        with torch.random.fork_rng(devices=[]):
+            classifier, calibration = load_classifier(classifier_path, device)
+        evaluator = GlyphEvaluator(classifier, calibration, images, EVALUATION_SAMPLES, EVALUATION_WALKS, EVALUATION_SEED, device)
+    return _Monitor(_image_noise(1, images.shape[-1], device), evaluator)
+
+
+def _prepare_evaluation_csv(output_dir: Path, step: int) -> None:
+    # 再開するときに、これまでの評価の値を今の列に合わせて書き直す(評価の値の種類が増えたあとに再開すると、古い行の列がずれるため。
+    # 古い行にない値は空にする)。再開した時点より後の行は消す(評価のあと、再開用のチェックポイントを書く前に止まると、
+    # その時点を再開のあとにもう一度評価するため)
+    csv_path = output_dir / EVALUATION_CSV
+    if not csv_path.exists():
+        return
+    with csv_path.open(newline="") as file:
+        rows = [row for row in csv.DictReader(file) if int(row["step"]) <= step]
+    with csv_path.open("w", newline="") as file:
+        writer = csv.DictWriter(file, ["step", *CSV_HEADER], restval="", extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _random_styles(mapping: glyph_gan.MappingNetwork, num_layers: int, device: torch.device) -> torch.Tensor:
@@ -315,8 +339,8 @@ def _train_step(models: _Models, images: torch.Tensor, step: int, path_length_me
 
 @torch.no_grad()
 def _metrics_text(models: _Models, monitor: _Monitor) -> str:
-    # スタイルの散らばり(別々のノイズから作ったスタイルどうしの平均距離 / スタイルの大きさ)、崩れの割合、
-    # 文字認識のモデルがあれば2字の種類の数(部分的な崩壊の検出)
+    # 保存ごとの評価の間を埋める、文字認識のモデルなしで測れる軽い見張り(学習の初めの崩壊・崩れを早く見つける):
+    # スタイルの散らばり(別々のノイズから作ったスタイルどうしの平均距離 / スタイルの大きさ)と、崩れの割合
     mapping, generator = models.mapping, models.generator
     mapping.eval()
     generator.eval()
@@ -324,12 +348,35 @@ def _metrics_text(models: _Models, monitor: _Monitor) -> str:
     spread = (pairwise_distances(style).mean() / style.norm(dim=1).mean()).item()
     ink = glyph_gan.generate_in_chunks(generator, style[:, None, :].expand(-1, generator.num_layers, -1), monitor.reference_noise).clamp(0, 1)
     rates = artifact_rates(ink)
-    text = f"style spread {spread:.3f} | framed {100 * rates.framed:.1f}% inverted {100 * rates.inverted:.1f}% filled {100 * rates.filled:.1f}%"
-    if monitor.classifier is not None:
-        text += f" | pair types {pair_types(monitor.classifier.features(ink), monitor.same_glyph_distance):.1f}"
     mapping.train()
     generator.train()
-    return text
+    return f"style spread {spread:.3f} | framed {100 * rates.framed:.1f}% inverted {100 * rates.inverted:.1f}% filled {100 * rates.filled:.1f}%"
+
+
+def _save_snapshot(models: _Models, step: int, config: dict, output_dir: Path) -> Path:
+    # 推論に使う移動平均の版の重みだけを、保存ごとにすべて残す(再開用のチェックポイントより小さく、あとで学習の途中のどの時点も評価し直せる。
+    # load_glyph_generator でそのまま読める)
+    path = output_dir / f"snapshot_{step:07d}.pt"
+    torch.save({"mapping_ema": models.mapping_ema.state_dict(), "generator_ema": models.generator_ema.state_dict(), "step": step, "config": config}, path)
+    return path
+
+
+def _evaluate_snapshot(evaluator: GlyphEvaluator, snapshot: Path, step: int, output_dir: Path) -> None:
+    # 読み込むモデルの重みの初期化で学習の乱数が進まないよう、別の乱数の流れで読む(評価の有無で学習が変わらないように)
+    with torch.random.fork_rng(devices=[]):
+        model = load_glyph_generator(snapshot, evaluator.device)
+    evaluation, _ = evaluator.evaluate(model)
+    gates = "passed" if not evaluation.failed_gates() else "failed " + ", ".join(evaluation.failed_gates())
+    print(f"evaluation at step {step}: coverage {evaluation.coverage:.3f} density {evaluation.density:.3f} precision {evaluation.precision:.3f} "
+          f"recall {evaluation.recall:.3f} | pair types {evaluation.pair_types:.1f} | novelty {100 * evaluation.novelty:.1f}% | "
+          f"jump rate {100 * evaluation.jump_rate:.2f}% | gates {gates}", flush=True)
+    csv_path = output_dir / EVALUATION_CSV
+    is_new = not csv_path.exists()
+    with csv_path.open("a", newline="") as file:
+        writer = csv.writer(file)
+        if is_new:
+            writer.writerow(["step", *CSV_HEADER])
+        writer.writerow([step, *evaluation.csv_row()])
 
 
 def _checkpoint_path(output_dir: Path, step: int) -> Path:
@@ -359,7 +406,12 @@ def _train(models: _Models, images: torch.Tensor, monitor: _Monitor, step: int, 
         if step % METRICS_EVERY == 0:
             print(f"metrics at step {step}: {_metrics_text(models, monitor)}", flush=True)
         if step % SAVE_EVERY == 0 or step == total_steps:
+            # 評価を再開用のチェックポイントより先に済ませる(間で止まっても、再開したときにこの時点をもう一度評価する)
+            snapshot = _save_snapshot(models, step, config, output_dir)
+            if monitor.evaluator is not None:
+                _evaluate_snapshot(monitor.evaluator, snapshot, step, output_dir)
             _save_checkpoint(models, step, path_length_mean, config, output_dir)
+            start_step, start_time = step, time.time()  # 1歩の時間に、保存と評価の時間を含めない
 
 
 def main() -> None:
@@ -368,6 +420,10 @@ def main() -> None:
     if args.seed is not None:
         _fix_seed(args.seed)
     output_dir = DATA_DIR / "checkpoints" / "glyph_gan" / args.name
+    # 結果を落としたあとは、podの上にチェックポイントがなく評価の値だけが残るので、それも見る
+    if not args.resume and (any(output_dir.glob("*.pt")) or (output_dir / EVALUATION_CSV).exists()):
+        # 別の学習のチェックポイント・スナップショット・評価の値が混ざらないように
+        raise SystemExit(f"{output_dir} already has a run: continue it with --resume or use another --name")
     state = _load_latest_checkpoint(output_dir, device) if args.resume else None
     if state is not None:
         _restore_settings(state["config"])
@@ -383,7 +439,8 @@ def main() -> None:
     print(f"device {device} | {len(images)} glyphs of {image_size}px from {args.data}", flush=True)
     models = _build_models(image_size, device)
     step, path_length_mean = _restore_models(models, state) if state is not None else (0, None)
-    monitor = _build_monitor(args.classifier, image_size, device)
+    monitor = _build_monitor(args.classifier, images, device)
+    _prepare_evaluation_csv(output_dir, step)
 
     _train(models, images, monitor, step, path_length_mean, math.ceil(args.kimg * 1000 / BATCH), config, output_dir)
     print("done", flush=True)

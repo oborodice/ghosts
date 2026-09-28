@@ -39,7 +39,8 @@ $ uv run scripts/build_glyph_dataset.py --resolution 128
 
 # 学習データ(data/glyphs_64.npz)でGAN(写像ネットワーク・生成器・判別器、scripts/glyph_gan.py)を学習し、
 # data/checkpoints/glyph_gan/<名前>/checkpoint_<歩数>.ptへ保存する。チェックポイントには、推論に使う移動平均の版の重みと、
-# 再開に使う最適化の状態も入る。既定の設定は、同じ字ばかり出る崩壊と長い学習での崩れを避けるために確かめた構成
+# 再開に使う最適化の状態も入る(最新の3つと1万歩ごとのものを残す)。保存ごとに、推論に使う移動平均の版の重みだけを
+# snapshot_<歩数>.pt としてすべて残す(学習の途中のどの時点も、あとで評価し直せる)。既定の設定は、同じ字ばかり出る崩壊と長い学習での崩れを避けるために確かめた構成
 # (ロジスティック損失、判別器の学習率=生成器、写像ネットワークの学習率の倍率0.01、強い勾配の罰則、左右反転なしの増強)。
 # 学習中は、スタイルの散らばりと崩れ(外周の枠・白黒の反転・塗りつぶし)の割合を定期的に表示する。
 # GPU(CUDA)、Apple Silicon(MPS)、CPUの順に使えるものを使う
@@ -48,14 +49,15 @@ $ uv run scripts/train_glyph_gan.py --name <名前>
 # 学習の長さ(千枚単位、省略時は1920 = バッチ64で3万歩)と乱数の種を指定する
 $ uv run scripts/train_glyph_gan.py --name <名前> --kimg 960 --seed 1
 
-# 途中で止まった学習を、同じ名前の最新のチェックポイントから続ける(上書きした設定も、保存した値に戻る)
+# 途中で止まった学習を、同じ名前の最新のチェックポイントから続ける(上書きした設定も、保存した値に戻る)。
+# 学習の量を増やして同じように続ければ、学習を延ばせる。すでにある名前で --resume なしに始めると、混ざらないよう止まる
 $ uv run scripts/train_glyph_gan.py --name <名前> --resume
 
 # 学習の設定(スクリプトの冒頭の定数)を、この学習だけ変える(スイープ用。何度でも指定できる。使った値はチェックポイントに残る)
 $ uv run scripts/train_glyph_gan.py --name <名前> --override LEARNING_RATE=1e-4 --override CAPACITY=16
 
-# 学習中に、文字認識のモデルで2字の種類の数(同じ字ばかり出る崩壊の目安)も表示する
-$ uv run scripts/train_glyph_gan.py --name <名前> --classifier <文字認識のモデルの重み>
+# 保存ごとに、スナップショットを文字認識のモデルで評価のスクリプトと同じ方法で評価し、ログに1行出して evaluation.csv に足す
+$ uv run scripts/train_glyph_gan.py --name <名前> --classifier data/glyph_classifier.pt
 
 # 別の解像度の学習データで学習する(省略時はdata/glyphs_64.npz)
 $ uv run scripts/train_glyph_gan.py --name <名前> --data data/glyphs_128.npz
@@ -70,9 +72,13 @@ $ uv run scripts/train_glyph_classifier.py --data data/glyphs_128.npz --output d
 
 # 学習したチェックポイント(推論に使う移動平均の版の重み)を評価する。新しさ(知らない字になっているか)、
 # 2字の種類の数(同じ字ばかり出ていないか)、崩れの割合、精度・再現率・密度・網羅率(実在字の分布との重なり。
-# 実在字どうしの値を並べる)、なめらかさ(表示側と同じsimplex noiseの軌跡での、急な切り替わりの割合)を表示し、
-# 生成した字の一覧の画像をチェックポイントの隣に保存する
+# 実在字どうしの値を並べる)、なめらかさ(表示と同じsimplex noiseの軌跡での、急な切り替わりの割合)を表示し、
+# 生成した字の一覧の画像をチェックポイントの隣に保存する。関門(崩れ・崩壊・新しさ・なめらかさ)を満たしたかも表示する
 $ uv run scripts/evaluate_glyph_gan.py --checkpoint data/checkpoints/glyph_gan/<名前>/checkpoint_<歩数>.pt
+
+# 学習の途中の複数の時点を、同じ実在字・同じsimplex noiseの位置で比べ、値をCSVに書き出す。
+# 関門をすべて満たすもののうち、網羅率が最も高いものを示す
+$ uv run scripts/evaluate_glyph_gan.py --checkpoint data/checkpoints/glyph_gan/<名前>/snapshot_*.pt --csv <CSVのパス>
 
 # 字の数(省略時は生成物・実在字それぞれ1万字)と軌跡の数(省略時は64本)を減らして、手早く確かめる
 $ uv run scripts/evaluate_glyph_gan.py --checkpoint <チェックポイント> --samples 1000 --walks 4
@@ -263,7 +269,7 @@ $ ./scripts/runpod_deploy_code.sh <ip> <port> [--data <file>] [--classifier <fil
 $ ./scripts/runpod_deploy_code.sh <ip> <port>
 # 学習データ(training/data/配下のファイル)も送る(初回のみ)
 $ ./scripts/runpod_deploy_code.sh <ip> <port> --data glyphs_64.npz
-# 学習中に種類の数を測る文字認識のモデルの重み(training/data/配下のファイル)も送る
+# 保存ごとの評価に使う文字認識のモデルの重み(training/data/配下のファイル)も送る
 $ ./scripts/runpod_deploy_code.sh <ip> <port> --data glyphs_64.npz --classifier <文字認識のモデルの重み>
 # 本番のtraining/scripts以外(アブレーション用のスクラッチコピーなど)を送る
 $ ./scripts/runpod_deploy_code.sh <ip> <port> --source <local-dir>
@@ -280,17 +286,19 @@ $ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --train-args "
 # 止まった学習を、最新のチェックポイントから続ける
 $ ./scripts/runpod_launch_training.sh <ip> <port> --name <名前> --resume
 
-# 学習が動いているか・ログの直近n行・最新の指標(スタイルの散らばり、崩れの割合など)を確認する
+# 学習が動いているか・ログの直近n行・最新の指標(スタイルの散らばり、崩れの割合など)・最新の評価(--classifier を指定したとき)を確認する
 $ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> [--lines <n>] [--remote-dir <path>]
 $ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前>
 # 表示する行数を指定する
 $ ./scripts/runpod_check_progress.sh <ip> <port> --name <名前> --lines 50
 
-# 学習の結果(チェックポイントのディレクトリとログ)を、ローカルのdata/checkpoints/glyph_gan/<名前>/へ落とす。
-# ファイルの数と中身(SHA-256)をpodの上と比べ、すべて一致したときだけpodの上のチェックポイントを消す。
+# 学習の結果(チェックポイント・スナップショット・評価の値のディレクトリとログ)を、ローカルのdata/checkpoints/glyph_gan/<名前>/へ落とす。
+# ファイルの数と中身(SHA-256)をpodの上と比べ、すべて一致したときだけpodの上のチェックポイントとスナップショットを消す。
 # podを消す前に必ず実行する(Network Volumeを使わないpodでは、podを消すと中身も消えるため)
 $ ./scripts/runpod_download_results.sh <ip> <port> --name <名前> [--keep-remote] [--remote-dir <path>]
 $ ./scripts/runpod_download_results.sh <ip> <port> --name <名前>
+# podの上のファイルを消さずに落とす(学習を延ばす前など)
+$ ./scripts/runpod_download_results.sh <ip> <port> --name <名前> --keep-remote
 
 # podを削除して課金を止める(Network Volumeは残る)
 $ ./scripts/runpod_terminate.sh <pod-id>
