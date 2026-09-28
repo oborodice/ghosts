@@ -87,6 +87,10 @@ $ uv run scripts/evaluate_glyph_gan.py --checkpoint <チェックポイント> -
 # 文字認識のモデル・実在字のデータ・乱数の種を指定する
 $ uv run scripts/evaluate_glyph_gan.py --checkpoint <チェックポイント> --classifier <文字認識のモデルの重み> --data <学習データ> --seed 1
 
+# 学習中の保存ごとの評価の値(evaluation.csv)を、複数の学習ぶん並べて、歩数ごとの推移を1枚の画像に描く
+# (関門を満たさなかった時点は白抜きの点)。学習の名前か、evaluation.csv のパスを渡す
+$ uv run scripts/plot_glyph_gan_evaluations.py <名前1> <名前2> --output <画像のパス>
+
 # 学習したチェックポイントの生成器を、data/onnx/glyph_generator.onnxへ書き出す(推論には移動平均の版の重みを使う)。
 # 入力はsimplex noiseの値で、正規分布への変換 → 写像ネットワーク → 生成器 → インクの画像。
 # 書き出したあと、同じ入力でPyTorchとONNX Runtimeの出力を比べる
