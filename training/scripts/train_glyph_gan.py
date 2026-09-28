@@ -369,7 +369,7 @@ def _evaluate_snapshot(evaluator: GlyphEvaluator, snapshot: Path, step: int, out
     gates = "passed" if not evaluation.failed_gates() else "failed " + ", ".join(evaluation.failed_gates())
     print(f"evaluation at step {step}: coverage {evaluation.coverage:.3f} density {evaluation.density:.3f} precision {evaluation.precision:.3f} "
           f"recall {evaluation.recall:.3f} | pair types {evaluation.pair_types:.1f} | novelty {100 * evaluation.novelty:.1f}% | "
-          f"jump rate {100 * evaluation.jump_rate:.2f}% | gates {gates}", flush=True)
+          f"copies {100 * evaluation.copy_share:.2f}% | jump rate {100 * evaluation.jump_rate:.2f}% | gates {gates}", flush=True)
     csv_path = output_dir / EVALUATION_CSV
     is_new = not csv_path.exists()
     with csv_path.open("a", newline="") as file:

@@ -6,7 +6,10 @@
 # - 精度・再現率(Kynkäänniemi et al. 2019)と、密度・網羅率(Naeem et al. 2020): 生成物と実在字の分布の重なり(実在字どうしの値を上限の目安に並べる)
 #   - 精度・密度は形の質(生成物が実在字の分布の中に入るか)、再現率・網羅率は広がり(実在字の分布を覆うか)を見る
 # - なめらかさ: simplex noiseの軌跡(表示と同じ作り方)の上で、1フレームの特徴の変化が、別の字への急な切り替わりとみなせる距離を超える割合
-# 学習の途中のどの時点を使うかは、関門(崩れ・崩壊・新しさ・なめらかさ)をすべて満たすもののうち、網羅率が最も高いものを選ぶ
+# - 写し: 学習データの丸写しを見るための、学習データの中で最も近い画像との距離(ピクセルの差の二乗平均の平方根)が、実在字どうしの距離
+#   (実在字と、学習データの中で最も近い別の画像。同じ字の別の書風が近くにある)の1%点以下の字の割合。新しさは実在字として読まれる字を
+#   数えるが、実在字に似ているだけの字と写した字を区別できないので、ピクセルの近さで別に見る
+# 学習の途中のどの時点を使うかは、関門(崩れ・崩壊・新しさ・写し・なめらかさ)をすべて満たすもののうち、網羅率が最も高いものを選ぶ
 from typing import NamedTuple
 
 import numpy as np
@@ -23,6 +26,9 @@ PRECISION_RECALL_NEIGHBORS = 5
 PAIR_TYPE_SAMPLES = 2000
 FEATURE_CHUNK = 500
 WALK_SECONDS = 10  # なめらかさに使う軌跡1本の長さ(秒)
+COPY_REFERENCE_SAMPLES = 2000  # 実在字どうしの距離を測る実在字の数
+COPY_REFERENCE_QUANTILE = 0.01  # 学習データとの距離が、実在字どうしの距離のこの分位点以下の字を、写しとみなす
+NEAREST_CHUNK = 256  # 最も近い画像を探すときに、一度に比べる字の数(距離の表が 字の数 x 学習データの数 になるため)
 # 関門(使う時点の候補に残すための条件)。外周の枠・白黒の反転は、これまでの学習の合格の条件と同じ。ほかは基準の学習の結果を見て見直す仮の値
 # (新しさは、これまでで最も良い重みで約98%だったので、それを落とさない程度にしている)
 MAX_FRAMED = 0.02
@@ -30,12 +36,15 @@ MAX_INVERTED = 0.005
 MAX_FILLED = 0.02
 MIN_PAIR_TYPES_RATIO = 0.5  # 2字の種類の数が、実在字の値のこの割合以上(崩壊していない)
 MIN_NOVELTY = 0.95
+MAX_COPY_SHARE = 0.01
 MAX_JUMP_RATE = 0.001
 
 
 class Evaluation(NamedTuple):
     novelty: float  # 実在字として確信を持って読まれない字の割合
     median_max_probability: float
+    copy_share: float  # 学習データとの距離が、実在字どうしの距離の1%点以下の字の割合
+    nearest_median: float  # 学習データの中で最も近い画像との距離の中央値
     pair_types: float
     real_pair_types: float  # 実在字どうしの2字の種類の数(比べる目安)
     framed: float
@@ -53,12 +62,14 @@ class Evaluation(NamedTuple):
         # 満たさなかった関門の名前(空なら候補に残る)
         checks = {"framed": self.framed <= MAX_FRAMED, "inverted": self.inverted <= MAX_INVERTED, "filled": self.filled <= MAX_FILLED,
                   "pair_types": self.pair_types >= MIN_PAIR_TYPES_RATIO * self.real_pair_types, "novelty": self.novelty >= MIN_NOVELTY,
-                  "jump_rate": self.jump_rate <= MAX_JUMP_RATE}
+                  "copy_share": self.copy_share <= MAX_COPY_SHARE, "jump_rate": self.jump_rate <= MAX_JUMP_RATE}
         return [name for name, passed in checks.items() if not passed]
 
     def report(self) -> str:
         return "\n".join([
             f"novelty: share with max prob < {NOVELTY_PROBABILITY} = {100 * self.novelty:.1f}% (median max prob {self.median_max_probability:.3f})",
+            f"copies: share as close to a training image as real kanji at their {COPY_REFERENCE_QUANTILE:.0%} point = {100 * self.copy_share:.2f}% "
+            f"(median nearest distance {self.nearest_median:.3f})",
             f"pair types: generated {self.pair_types:.1f} | real {self.real_pair_types:.1f}",
             f"artifacts: framed {100 * self.framed:.1f}% | inverted {100 * self.inverted:.1f}% | filled {100 * self.filled:.1f}%",
             f"generated: precision {self.precision:.3f} recall {self.recall:.3f} density {self.density:.3f} coverage {self.coverage:.3f}",
@@ -111,12 +122,29 @@ class GlyphEvaluator:
         reference_features, _ = _features_and_probabilities(classifier, real_images[samples:])
         self.real_pair_types = pair_types(self.real_features[:PAIR_TYPE_SAMPLES], calibration.same_glyph_distance)
         self.reference = _precision_recall_density_coverage(self.real_features, reference_features, PRECISION_RECALL_NEIGHBORS)
+        # 写しの基準: 実在字それぞれと、学習データの中で最も近い別の画像との距離の分位点
+        self.training_pixels = images.to(device).flatten(1).float().div_(255)  # 学習データ全体(約4GB)なので、その場で割り、メモリの上に2つ持たない
+        self.training_squared_norms = self.training_pixels.pow(2).sum(1)
+        copy_reference = torch.from_numpy(np.random.default_rng(seed).choice(len(images), COPY_REFERENCE_SAMPLES, replace=False)).to(device)
+        reference_distances = self._nearest_training_distances(self.training_pixels[copy_reference], exclude=copy_reference)
+        self.copy_distance = reference_distances.quantile(COPY_REFERENCE_QUANTILE).item()
+
+    def _nearest_training_distances(self, pixels: torch.Tensor, exclude: torch.Tensor | None = None) -> torch.Tensor:
+        # 各行について、学習データの中で最も近い画像との距離(ピクセルの差の二乗平均の平方根、0〜1)。exclude は、その行自身の添字(除く)
+        distances = []
+        for start in range(0, len(pixels), NEAREST_CHUNK):
+            chunk = pixels[start:start + NEAREST_CHUNK]
+            squared = chunk.pow(2).sum(1, keepdim=True) + self.training_squared_norms[None] - 2 * chunk @ self.training_pixels.T
+            if exclude is not None:
+                squared[torch.arange(len(chunk), device=chunk.device), exclude[start:start + NEAREST_CHUNK]] = float("inf")
+            distances.append((squared.min(1).values.clamp(min=0) / pixels.shape[1]).sqrt())
+        return torch.cat(distances)
 
     def reference_report(self) -> str:
         precision, recall, density, coverage = self.reference
         return (f"real vs real (reference): precision {precision:.3f} recall {recall:.3f} density {density:.3f} coverage {coverage:.3f} "
                 f"(n={self.samples}, k={PRECISION_RECALL_NEIGHBORS}) | pair types from {min(PAIR_TYPE_SAMPLES, self.samples)} glyphs | "
-                f"jump distance {self.calibration.jump_distance:.2f}")
+                f"jump distance {self.calibration.jump_distance:.2f} | copy distance {self.copy_distance:.3f}")
 
     def _feature_changes(self, model: GlyphGenerator) -> torch.Tensor:
         # 表示と同じ速さで進む軌跡の、隣り合うフレームの特徴の距離(すべての軌跡をつなげたもの)
@@ -137,9 +165,12 @@ class GlyphEvaluator:
         rates = artifact_rates(ink)
         precision, recall, density, coverage = _precision_recall_density_coverage(self.real_features, fake_features, PRECISION_RECALL_NEIGHBORS)
         changes = self._feature_changes(model)
+        nearest = self._nearest_training_distances(ink.flatten(1))
         evaluation = Evaluation(
             novelty=(top_probability < NOVELTY_PROBABILITY).float().mean().item(),
             median_max_probability=top_probability.median().item(),
+            copy_share=(nearest <= self.copy_distance).float().mean().item(),  # 同じ画像が2枚ある学習データでは基準が0になりうるので、0でも写しを数える
+            nearest_median=nearest.median().item(),
             pair_types=pair_types(fake_features[:PAIR_TYPE_SAMPLES], self.calibration.same_glyph_distance),
             real_pair_types=self.real_pair_types,
             framed=rates.framed, inverted=rates.inverted, filled=rates.filled,
