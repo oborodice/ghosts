@@ -12,7 +12,7 @@
 ## セットアップ
 
 ```sh
-# 依存パッケージのインストール(リアルタイム表示だけが使うパッケージ(pyproject.toml の display のグループ)も入る)
+# 依存パッケージのインストール
 $ uv sync
 
 # 学習データ(フォントで描いた漢字の画像)に使う27書風のフォント(Google Fonts、OFL / Apache License 2.0)の取得
@@ -96,32 +96,11 @@ $ uv run scripts/plot_evaluations.py <名前1> <名前2> --output <画像のパ�
 
 # 学習したチェックポイントの生成器を、data/onnx/glyph_generator.onnxへ書き出す(推論には移動平均の版の重みを使う)。
 # 入力はsimplex noiseの値で、正規分布への変換 → 写像ネットワーク → 生成器 → インクの画像。
-# 書き出したあと、同じ入力でPyTorchとONNX Runtimeの出力を比べる
+# 書き出したあと、同じ入力でPyTorchとONNX Runtimeの出力を比べる。書き出した生成器の表示・録画は [表示側](../display/README.md) で行う
 $ uv run scripts/export_onnx.py --checkpoint data/checkpoints/glyph_gan/<名前>/checkpoint_<歩数>.pt
 
 # 書き出し先を指定する
 $ uv run scripts/export_onnx.py --checkpoint <チェックポイント> --output <ONNXのパス>
-
-# 書き出した生成器をONNX Runtime(CPU)で1フレームずつ動かし、GPUのシェーダーでフィルタ(輪郭のやわらげとくっきりさせる処理、
-# 色づけ、発光、境界を背景に溶け込ませるノイズ、背景のノイズ)をかけて、形を変え続ける字をウィンドウに表示し続ける
-# (ウィンドウはRaspberry Pi Touch Display 2を横向きにした1280x720を、既定では0.6倍に縮めた大きさで、字は中央に描く)。
-# 1秒ごとに、FPSと、生成器・描画の1フレームの時間を表示する。Escかqで終わる
-$ uv run scripts/run_display.py
-
-# 全画面で表示する
-$ uv run scripts/run_display.py --fullscreen
-
-# 別の生成器のONNXを使い、字の変わり方(simplex noiseの軌跡)を乱数の種で変える
-$ uv run scripts/run_display.py --model <ONNXのパス> --seed 1
-
-# ウィンドウを実寸(1280x720)で開く(既定は、開発機のMacで実物に近い見かけになるよう0.6倍に縮める)
-$ uv run scripts/run_display.py --scale 1
-
-# ウィンドウを出さずに、30秒ぶんを動画に書き出す(画面全体を実寸の1280x720で)
-$ uv run scripts/run_display.py --record <mp4のパス> --seconds 30
-
-# ウィンドウを出さずに、10秒ぶんをGIFに書き出す(字の正方形だけを350pxで)
-$ uv run scripts/run_display.py --record <GIFのパス> --seconds 10
 ```
 
 ## RunPodへのデプロイ
@@ -142,7 +121,7 @@ $ ./scripts/runpod/create_pod.sh --gpu "NVIDIA GeForce RTX 4090" --gpu "NVIDIA R
 # Network Volumeを/workspaceに付ける(そのVolumeのデータセンターで作るので、GPUの空きがないと作れないことがある)
 $ ./scripts/runpod/create_pod.sh --volume <network-volume-id>
 
-# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncして、CUDAが使えるかを確かめる(表示だけが使うパッケージは入れない)
+# コード(scripts・pyproject.toml・uv.lock)を転送しuv syncして、CUDAが使えるかを確かめる
 $ ./scripts/runpod/deploy_code.sh <ip> <port> [--data <file>] [--classifier <file>] [--source <local-dir>] [--remote-dir <path>] [--link-venv <remote-dir>]
 $ ./scripts/runpod/deploy_code.sh <ip> <port>
 # 学習データ(training/data/配下のファイル)も送る(初回のみ)
@@ -198,12 +177,11 @@ $ ./scripts/runpod/terminate.sh <pod-id>
 
 - このディレクトリのコードが使う、第三者のコード・データ・フォントと、そのライセンス
 
-| 対象 | ライセンス | 利用箇所 |
+|対象|ライセンス|利用箇所|
 |---|---|---|
-| [lucidrains/stylegan2-pytorch](https://github.com/lucidrains/stylegan2-pytorch) の、写像ネットワーク・生成器・判別器のコード(部分的にコピーし、改変したもの) | MIT License(全文は [licenses/stylegan2-pytorch.txt](licenses/stylegan2-pytorch.txt)) | `glyph/gan.py` |
-| [DiffAugment](https://github.com/mit-han-lab/data-efficient-gans) の増強(位置ずれ・切り抜き)(コードは含まず、同じ動きになるよう書き直したもの) | BSD 2-Clause License | `scripts/train_gan.py` |
-| [hash-prospector](https://github.com/skeeto/hash-prospector) の整数のハッシュ `lowbias32` (関数をそのままコピーしたもの) | The Unlicense | `glyph/shaders/glyph.frag` |
-| [Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外) | SIL Open Font License 1.1 | 学習データ(`scripts/download_fonts.py` で取得) |
-| Google Fonts の2書風(Kosugi・Kosugi Maru) | Apache License 2.0 | 学習データ(同上) |
+|[lucidrains/stylegan2-pytorch](https://github.com/lucidrains/stylegan2-pytorch) の、写像ネットワーク・生成器・判別器のコード(部分的にコピーし、改変したもの)|MIT License(全文は [licenses/stylegan2-pytorch.txt](licenses/stylegan2-pytorch.txt))|`glyph/gan.py`|
+|[DiffAugment](https://github.com/mit-han-lab/data-efficient-gans) の増強(位置ずれ・切り抜き)(コードは含まず、同じ動きになるよう書き直したもの)|BSD 2-Clause License|`scripts/train_gan.py`|
+|[Google Fonts](https://github.com/google/fonts) の25書風(Kosugi・Kosugi Maru以外)|SIL Open Font License 1.1|学習データ(`scripts/download_fonts.py` で取得)|
+|Google Fonts の2書風(Kosugi・Kosugi Maru)|Apache License 2.0|学習データ(同上)|
 
 - フォントの各ファミリーのライセンスの全文は、 `scripts/download_fonts.py` がフォントと一緒に `data/fonts/` へ取得する(`<ファミリーのディレクトリ名>_OFL.txt` / `<ファミリーのディレクトリ名>_LICENSE.txt`)

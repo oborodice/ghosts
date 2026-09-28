@@ -75,8 +75,7 @@ if [ -n "${LINK_VENV_FROM}" ]; then
   "${SSH[@]}" "ln -sfn ${LINK_VENV_FROM}/.venv ${REMOTE_DIR}/.venv"
 else
   echo "Running uv sync ..."
-  # 表示だけが使うパッケージ(pyproject.toml の display のグループ)は入れない(学習には要らず、pygame はpodの環境で組み立てられないため)
-  "${SSH[@]}" "export ${UV_ENV_VARS}; cd ${REMOTE_DIR} && uv sync --no-group display"
+  "${SSH[@]}" "export ${UV_ENV_VARS}; cd ${REMOTE_DIR} && uv sync"
 fi
 
 echo "Checking CUDA is recognized ..."

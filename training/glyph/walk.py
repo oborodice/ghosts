@@ -1,5 +1,5 @@
-# 字の変わり方を決める、潜在空間の軌跡(simplex noiseの値)。NumPyとopensimplexだけで動き(表示にtorchを要らなくするため)、
-# 表示(ONNX Runtime)・評価・ONNXへの書き出しで共通に使う。潜在の次元ごとにsimplex noiseの場の別の行をたどる
+# 字の変わり方を決める、潜在空間の軌跡(simplex noiseの値)。評価とONNXへの書き出しで共通に使う。潜在の次元ごとにsimplex noiseの場の
+# 別の行をたどる。表示(display/ のRustの版)も同じ作り方で軌跡を作る(速さ・次元どうしの間隔の値をそろえる)
 import numpy as np
 from opensimplex import OpenSimplex
 
@@ -18,11 +18,6 @@ def _values_at(noise: OpenSimplex, positions: np.ndarray, latent_dim: int) -> np
 def simplex_walk(latent_dim: int, frames: int, fps: float, noise_speed: float, seed: int) -> np.ndarray:
     # 0フレーム目から frames 個の軌跡。返り値は(フレームの数, 潜在の次元の数)
     return _values_at(OpenSimplex(seed), np.arange(frames) / fps * noise_speed, latent_dim)
-
-
-def simplex_frame(noise: OpenSimplex, frame: int, latent_dim: int, fps: float, noise_speed: float) -> np.ndarray:
-    # simplex_walk の frame 番目のフレームだけの値(終わりのない表示で、1フレームずつ作るため)。返り値は(1, 潜在の次元の数)
-    return _values_at(noise, np.array([frame / fps * noise_speed]), latent_dim)
 
 
 def simplex_scattered(latent_dim: int, count: int, seed: int) -> np.ndarray:

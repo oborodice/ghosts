@@ -15,18 +15,6 @@ dependencies = [
     "torch==2.10.0",
 ]
 
-# リアルタイム表示(scripts/run_display.py)だけが使うパッケージ。手元では既定で入れ、学習だけを回すpodでは入れない
-# (pygame はpodの環境向けの配布版がなく、ソースからの組み立てに失敗するため。runpod/deploy_code.sh が --no-group display で同期する)
-[dependency-groups]
-display = [
-    "av>=18.1.0",
-    "pygame>=2.6.1",
-    "pyopengl>=3.1.10",
-]
-
-[tool.uv]
-default-groups = ["display"]
-
 # 部品(glyph/)をパッケージとして入れ、scripts/ のどのスクリプトからも import できるようにする(uv sync で、手元のファイルを指す形で入る)
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10"]
