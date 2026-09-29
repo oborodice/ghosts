@@ -36,7 +36,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 EVALUATION_CSV = "evaluation.csv"  # 保存ごとの評価の値の書き出し先(学習の名前のディレクトリの中)
 # 以下の大文字の名前の、数・数の組の定数は、すべて学習の設定として扱う(--override で変えられ、チェックポイントに残る)
 # モデル
-CAPACITY = 12  # 生成器・判別器の容量(Pi 5 に載る大きさ)
+CAPACITY = 12  # 生成器・判別器の容量(表示で、小さなARMの計算機のCPUでも動かせる大きさ)
 LATENT_DIM = 256
 MAPPING_DEPTH = 4
 MAPPING_LEARNING_RATE_MULTIPLIER = 0.01
@@ -76,7 +76,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--name", required=True)  # 出力先 data/checkpoints/glyph_gan/<name>/
     parser.add_argument("--data", type=Path, default=DATA_DIR / "glyphs_64.npz")
     # 学習の長さ(見せる本物の画像の数、千枚単位)。バッチの大きさによらず、同じ量の学習を同じ数で指定できる。
-    # 小数も受け付ける(確かめのための短い学習用。例: バッチ64で 0.64 は10歩)
+    # 小数も受け付ける(確かめのための短い学習用。例: バッチ64で0.64は10歩)
     parser.add_argument("--kimg", type=float, default=1920)
     parser.add_argument("--classifier", type=Path)  # 保存ごとにスナップショットを評価する文字認識のモデル(省略時は評価しない)
     parser.add_argument("--resume", action="store_true")  # 同じ名前の最新のチェックポイントから続ける
@@ -252,7 +252,7 @@ def _random_cutout(images: torch.Tensor) -> torch.Tensor:
 
 
 def _augment(images: torch.Tensor) -> torch.Tensor:
-    # 大きさ・位置の範囲は、DiffAugment の公式の実装(https://github.com/mit-han-lab/data-efficient-gans)と同じ
+    # 大きさ・位置の範囲は、DiffAugmentの公式の実装(https://github.com/mit-han-lab/data-efficient-gans)と同じ
     images = _random_translation(images)
     return _random_cutout(images)
 

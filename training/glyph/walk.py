@@ -16,7 +16,7 @@ def _values_at(noise: OpenSimplex, positions: np.ndarray, latent_dim: int) -> np
 
 
 def simplex_walk(latent_dim: int, frames: int, fps: float, noise_speed: float, seed: int) -> np.ndarray:
-    # 0フレーム目から frames 個の軌跡。返り値は(フレームの数, 潜在の次元の数)
+    # 0フレーム目からframes個の軌跡。返り値は(フレームの数, 潜在の次元の数)
     return _values_at(OpenSimplex(seed), np.arange(frames) / fps * noise_speed, latent_dim)
 
 

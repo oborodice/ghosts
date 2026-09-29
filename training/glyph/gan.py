@@ -7,7 +7,7 @@
 # - 判別器に、ミニバッチの標準偏差の層(StyleGAN2と同じ形)を入れた(同じ画像ばかり出す生成器を見抜けるように)
 # - 写像ネットワークの重みの初期化を、学習率の倍率によらず出力の大きさが同じになるようにした
 # - 画像のチャンネル数を引数にした(学習データは1チャンネル)
-# - ぼかしを、kornia を使わずに同じ計算で書いた(3x3の[1, 2, 1]のフィルタ、端は反射で埋める)
+# - ぼかしを、korniaを使わずに同じ計算で書いた(3x3の[1, 2, 1]のフィルタ、端は反射で埋める)
 # - 使っていない機能(注意機構、量子化、透過チャンネル、定数を使わない初期ブロック)を除いた
 import math
 
@@ -159,7 +159,7 @@ class Generator(nn.Module):
 
 
 def generate_in_chunks(generator: Generator, styles: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-    # noise は字ごと(バッチと同じ数)か、全員で共有する1枚
+    # noiseは字ごと(バッチと同じ数)か、全員で共有する1枚
     return torch.cat([
         generator(styles[start:start + GENERATION_CHUNK], noise if len(noise) == 1 else noise[start:start + GENERATION_CHUNK])
         for start in range(0, len(styles), GENERATION_CHUNK)

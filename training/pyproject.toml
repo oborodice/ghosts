@@ -16,7 +16,7 @@ dependencies = [
     "torch==2.10.0",
 ]
 
-# 部品(glyph/)をパッケージとして入れ、scripts/ のどのスクリプトからも import できるようにする(uv sync で、手元のファイルを指す形で入る)
+# 部品(glyph/)をパッケージとして入れ、scripts/ のどのスクリプトからもimportできるようにする(uv syncで、手元のファイルを指す形で入る)
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10"]
 build-backend = "uv_build"

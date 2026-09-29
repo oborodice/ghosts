@@ -54,7 +54,7 @@ SSH_CONNECTION_FAILED=255
 
 remote_report() {
   # podの上で、1行目に「<改行で終わった行の数> <ジョブの状態(running: pid <n> / exit code <n> / not running)>」を出し、
-  # 2行目以降に、$1 が follow なら $2 行目以降の完成した行のうち $3 に合う行を、そうでなければ直近 $2 行(学習なら最新の指標・評価も)を出す。
+  # 2行目以降に、$1 がfollowなら $2 行目以降の完成した行のうち $3 に合う行を、そうでなければ直近 $2 行(学習なら最新の指標・評価も)を出す。
   # 長いログを丸ごと送らないよう、選ぶのはpodの上で行う。sshは引数を空白でつなぎ直すので、1つずつ引用して渡す
   "${SSH[@]}" "bash -s -- $(printf '%q ' "${REMOTE_DIR}" "${JOB}" "$1" "$2" "$3" "${IS_TRAINING}")" <<'EOF'
 cd "$1" || exit 1; job="$2"; mode="$3"; count="$4"; pattern="$5"; is_training="$6"
@@ -87,7 +87,7 @@ EOF
 
 if [ "${FOLLOW}" = 0 ]; then
   OUTPUT="$(remote_report list "${LINES_TO_SHOW}" "")"
-  # 1行目の行の数は、follow で使うもの。ここでは状態だけを出す
+  # 1行目の行の数は、followで使うもの。ここでは状態だけを出す
   HEADER="${OUTPUT%%$'\n'*}"
   echo "${HEADER#* }"
   echo "${OUTPUT#*$'\n'}"

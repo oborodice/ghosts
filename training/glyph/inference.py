@@ -16,7 +16,7 @@ NOISE_IMAGE_SEED = 0
 # 累積分布)を正規分布の分位点に写した値を持ち、点の間は直線でつなぐ。simplex noiseの値は1次元ごとに正規分布より裾が軽く偏るので、
 # 学習時の入力(正規分布)に合わせる
 GAUSSIANIZE_POINTS = 2001
-GAUSSIANIZE_RANGE = 1.0  # opensimplex の noise2 の値はこの範囲に収まる
+GAUSSIANIZE_RANGE = 1.0  # opensimplexのnoise2の値はこの範囲に収まる
 GAUSSIANIZE_SAMPLES = 2_000_000
 GAUSSIANIZE_SEED = 12345
 
@@ -46,7 +46,7 @@ class GlyphGenerator(nn.Module):
         return self.generator(styles, self.noise_image).clamp(0, 1)
 
     def generate_in_chunks(self, simplex_values: torch.Tensor) -> torch.Tensor:
-        # ONNXに書き出す forward は1字ずつ呼ぶ。評価などで多くの字を作るときはこちら
+        # ONNXに書き出すforwardは1字ずつ呼ぶ。評価などで多くの字を作るときはこちら
         chunk = gan.GENERATION_CHUNK
         return torch.cat([self(simplex_values[start:start + chunk]) for start in range(0, len(simplex_values), chunk)])
 
@@ -67,7 +67,7 @@ def _load_mapping_and_generator(checkpoint_path: Path, device: torch.device | st
 
 @functools.cache  # 作るのに約10秒かかり、中身は毎回同じなので、1回だけ作る(学習中に保存ごとに読むときなど)
 def _gaussianize_table() -> torch.Tensor:
-    # 表示でノイズを作るのと同じ関数(opensimplex の noise2)を、ばらばらの位置で大量に評価する
+    # 表示でノイズを作るのと同じ関数(opensimplexのnoise2)を、ばらばらの位置で大量に評価する
     side = int(math.sqrt(GAUSSIANIZE_SAMPLES))
     samples = np.sort(simplex_scattered(side, side, GAUSSIANIZE_SEED).ravel())
     grid = np.linspace(-GAUSSIANIZE_RANGE, GAUSSIANIZE_RANGE, GAUSSIANIZE_POINTS)

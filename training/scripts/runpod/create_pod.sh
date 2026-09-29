@@ -6,7 +6,7 @@ set -euo pipefail
 # ないとpodを作れない。指定しなければpod自身のディスク(podを消すと中身も消える)を使い、空きのあるデータセンターを
 # RunPodに選ばせる(その場合、結果はpodを消す前に download_results.sh で必ず落とす)。
 # --gpu を複数指定すると、空きがないときに次のGPUを順に試す。課金が発生するので、1つずつ作り、作れなかったときは
-# pod の一覧(runpodctl pod list)に同じ名前のpodがないことを確かめてから次を試し、1つ作れたらそこで止める
+# podの一覧(runpodctl pod list)に同じ名前のpodがないことを確かめてから次を試し、1つ作れたらそこで止める
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 TEMPLATE_ID="runpod-torch-v280"
 DEFAULT_GPU_ID="NVIDIA GeForce RTX 4090"
@@ -101,7 +101,7 @@ for i in range(20_000_000):
     x += i
 print(f"single-thread loop: {time.time() - started:.2f}s")
 PY
-# ホストによって、cgroup v2(cpu.max)と v1(cpu.cfs_quota_us。制限なしは -1)のどちらかになる
+# ホストによって、cgroup v2(cpu.max)とv1(cpu.cfs_quota_us。制限なしは -1)のどちらかになる
 echo -n "actual cgroup CPU budget: "
 if [ -f /sys/fs/cgroup/cpu.max ]; then
   read -r quota period < /sys/fs/cgroup/cpu.max

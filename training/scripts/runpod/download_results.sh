@@ -50,7 +50,7 @@ mkdir -p "$(dirname "${LOCAL_RUN_DIR}")"
 "${SCP[@]}" "root@${POD_IP}:${REMOTE_DIR}/train_${RUN_NAME}.log" "${LOCAL_RUN_DIR}/train.log"
 
 # podの上にあるファイルだけを、ローカルの同じ名前のファイルと比べる(前に落として、podの上からは消した分がローカルに残っていてもよい)
-# (チェックポイントがないときは何も出さない。sha256sum に存在しない *.pt を渡してエラーで止まらないように。
+# (チェックポイントがないときは何も出さない。sha256sumに存在しない *.pt を渡してエラーで止まらないように。
 # 評価の値は、学習に --classifier を指定したときだけある)
 REMOTE_SUMS="$("${SSH[@]}" "cd ${REMOTE_RUN_DIR} && ls *.pt >/dev/null 2>&1 && sha256sum *.pt \$(ls evaluation.csv 2>/dev/null) || true" | awk '{print $1, $2}' | sort)"
 if [ -z "${REMOTE_SUMS}" ]; then

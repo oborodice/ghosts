@@ -3,7 +3,7 @@ set -euo pipefail
 
 # podの上で、scripts/ の任意のPythonスクリプトを、SSHから切り離してバックグラウンドで始める(学習のほか、文字認識のモデルの学習・
 # 評価・分析など)。ログは <ジョブの名前>.log、プロセスの番号は <ジョブの名前>.pid に書き、終わるとログの最後に「exit code <n>」を足す
-# (check_progress.sh --job で、動いているか・どう終わったかを見る)。setsid で新しいセッションにし、標準入出力もすべて
+# (check_progress.sh --job で、動いているか・どう終わったかを見る)。setsidで新しいセッションにし、標準入出力もすべて
 # ログへ向けるので、SSHを切っても止まらず、ローカルのsshコマンドもすぐに戻る
 SSH_KEY="${HOME}/.runpod/ssh/runpodctl-ssh-key"
 DEFAULT_REMOTE_DIR="/workspace/ghosts/training"
@@ -48,9 +48,9 @@ SSH=(ssh -i "${SSH_KEY}" -o StrictHostKeyChecking=no -p "${POD_PORT}" "root@${PO
 dir="$1"; job="$2"; append="$3"; shift 3
 cd "${dir}" || exit 1
 # 背後に回すのは、出力をすべてログへ向けた1つのコマンドだけにする(複数のコマンドをまとめて背後に回すと、その子シェルの出力が
-# SSHにつながったままになり、SSHが戻らない)。uv run ではなく .venv の python を直接呼ぶ(--link-venv でつないだ venv に対して、
-# uv がロックの確認・同期をし直そうとするのを避ける)。部品のパッケージ(glyph)は、この配置先のものを使うよう PYTHONPATH の先頭に置く
-# (--link-venv でつないだ venv は、venv を作った配置先の glyph を指しているため)
+# SSHにつながったままになり、SSHが戻らない)。uv runではなく .venv のpythonを直接呼ぶ(--link-venv でつないだvenvに対して、
+# uvがロックの確認・同期をし直そうとするのを避ける)。部品のパッケージ(glyph)は、この配置先のものを使うようPYTHONPATHの先頭に置く
+# (--link-venv でつないだvenvは、venvを作った配置先のglyphを指しているため)
 wrapper='"$@"; echo "exit code $?"'
 export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
 if [ "${append}" = 1 ]; then

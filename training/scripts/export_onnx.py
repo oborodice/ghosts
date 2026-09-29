@@ -16,7 +16,7 @@ from glyph.walk import simplex_scattered
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # PyTorchの書き出しが中で使う演算の定義(torchlib)の版。ほかの版を指定すると、書き出したあとに版の変換が入る。
-# 生成器は基本の演算だけを使うので、新しい版にする利点はない(表示の実行ファイルに入れたONNX Runtime 1.28 で読める)
+# 生成器は基本の演算だけを使うので、新しい版にする利点はない(表示の実行ファイルに入れたONNX Runtime 1.28で読める)
 OPSET_VERSION = 18
 
 

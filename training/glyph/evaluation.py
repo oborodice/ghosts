@@ -130,7 +130,7 @@ class GlyphEvaluator:
         self.copy_distance = reference_distances.quantile(COPY_REFERENCE_QUANTILE).item()
 
     def _nearest_training_distances(self, pixels: torch.Tensor, exclude: torch.Tensor | None = None) -> torch.Tensor:
-        # 各行について、学習データの中で最も近い画像との距離(ピクセルの差の二乗平均の平方根、0〜1)。exclude は、その行自身の添字(除く)
+        # 各行について、学習データの中で最も近い画像との距離(ピクセルの差の二乗平均の平方根、0〜1)。excludeは、その行自身の添字(除く)
         distances = []
         for start in range(0, len(pixels), NEAREST_CHUNK):
             chunk = pixels[start:start + NEAREST_CHUNK]

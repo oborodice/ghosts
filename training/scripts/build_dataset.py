@@ -149,7 +149,7 @@ def _build_dataset(resolution: int) -> dict[str, np.ndarray]:
     index_of = {codepoint: index for index, codepoint in enumerate(kanji)}
     return {
         "images": np.stack(images),  # (字の数, 解像度, 解像度) uint8。0=紙〜255=インク
-        "labels": np.array([index_of[codepoint] for codepoint in codepoints]),  # 何番目の漢字か(kanji の添字)
+        "labels": np.array([index_of[codepoint] for codepoint in codepoints]),  # 何番目の漢字か(kanjiの添字)
         "styles": np.array(styles),  # 何番目の書風か(style_names の添字)
         "kanji": np.array(kanji),  # 漢字のコードポイント
         "style_names": np.array([pinned.family for pinned in FONTS]),
