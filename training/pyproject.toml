@@ -1,6 +1,6 @@
 [project]
 name = "ghosts-training"
-version = "0.1.0"
+version = "1.0.0"
 description = "Trains the ghost kanji glyph GAN and exports its generator to ONNX"
 license = "GPL-3.0-only"
 requires-python = ">=3.14"
