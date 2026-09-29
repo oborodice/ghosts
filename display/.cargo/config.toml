@@ -1,0 +1,3 @@
+# 開発機のMacでは、Homebrewで入れたSDL2(brew install sdl2)をつなぐ
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/lib"]

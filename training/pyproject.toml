@@ -1,16 +1,26 @@
 [project]
 name = "ghosts-training"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+version = "1.0.0"
+description = "Trains the ghost kanji glyph GAN and exports its generator to ONNX"
+license = "GPL-3.0-only"
 requires-python = ">=3.14"
 dependencies = [
+    "fonttools>=4.64.0",
     "matplotlib>=3.11.1",
     "numpy>=2.5.2",
     "onnx>=1.22.0",
     "onnxruntime>=1.29.0",
     "onnxscript>=0.7.1",
-    "scikit-learn>=1.9.0",
-    "svgpathtools>=1.8.0",
-    "torch>=2.2.0",
+    "opensimplex>=0.4.5.1",
+    "pillow>=12.3.0",
+    "torch==2.10.0",
 ]
+
+# 部品(glyph/)をパッケージとして入れ、scripts/ のどのスクリプトからもimportできるようにする(uv syncで、手元のファイルを指す形で入る)
+[build-system]
+requires = ["uv_build>=0.9.7,<0.10"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "glyph"
+module-root = ""

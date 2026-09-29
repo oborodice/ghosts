@@ -1,90 +1,49 @@
 #!/usr/bin/env python3
+# 学習したGAN(train_gan.py のチェックポイント)の生成器を、ONNXに書き出す。
+# 入力はsimplex noiseの値(潜在の次元の数)で、正規分布への変換 → 写像ネットワーク → 生成器 → インクの画像(0=紙〜1=インク、1チャンネル)。
+# - 推論には移動平均の版の重みを使う
+# - ノイズの画像(ノイズの注入)は、フレームごとに変えると字がちらつくため、定数として埋め込む
+# 書き出したあと、同じ入力でPyTorchとONNX Runtimeの出力を比べる
+import argparse
 from pathlib import Path
 
 import numpy as np
 import onnxruntime
 import torch
-import torch.nn as nn
 
-from vae_checkpoint import load_checkpoint
-from vae_eval_common import attract_to_latent_prior, encode, load_train_data
-from vae_model import VAE, ModelShape, unflatten_output
+from glyph.inference import GlyphGenerator, load_glyph_generator
+from glyph.walk import simplex_scattered
 
-# webがfetchして読み込む配置場所(training/dataではなくweb/publicに置く)
-ONNX_PATH = Path(__file__).resolve().parent.parent.parent / "web" / "public" / "vae.onnx"
-
-OPSET_VERSION = 18  # 使用する演算(Linear, ReLU, Sigmoidなど)はいずれも古くから存在し、特定opsetを要求する要素はないため、比較的新しく安定している値を選んだ
-# web側は1フレームにつき1文字しか生成しないため、バッチサイズは常に1で固定する。decoderに
-# nn.TransformerEncoderを導入した際、torch.onnx.exportの可変バッチ(dynamic_shapes)が
-# 効かなくなることを確認したため、元々不要だった可変バッチ対応自体を廃止した
-BATCH_SIZE = 1
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# PyTorchの書き出しが中で使う演算の定義(torchlib)の版。ほかの版を指定すると、書き出したあとに版の変換が入る。
+# 生成器は基本の演算だけを使うので、新しい版にする利点はない(表示の実行ファイルに入れたONNX Runtime 1.28で読める)
+OPSET_VERSION = 18
 
 
-class _GenerationModel(nn.Module):
-    # 生成用のz_rawを実データ(mu_real)へ引き寄せるカーネル重み付け(attract_to_latent_prior)+
-    # decode + 標準化の逆変換 + existenceのSigmoidまで含めることで、
-    # web側は学習データの統計的な性質を一切知らず、生成用のzをそのまま渡すだけでよくなる
-    def __init__(
-        self, model: VAE, shape: ModelShape, mean: torch.Tensor, std: torch.Tensor, mu_real: torch.Tensor
-    ) -> None:
-        super().__init__()
-        self.model = model
-        self.shape = shape
-        self.register_buffer("mean", mean)
-        self.register_buffer("std", std)
-        self.register_buffer("mu_real", mu_real)
-
-    def forward(self, z_raw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        z = attract_to_latent_prior(z_raw, self.mu_real)
-        recon = self.model.decode(z)
-        strokes, existence_logits = unflatten_output(recon, self.shape)
-        strokes = strokes * self.std + self.mean
-        return strokes, torch.sigmoid(existence_logits)
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=DATA_DIR / "onnx" / "glyph_generator.onnx")
+    return parser.parse_args()
 
 
-def _verify_export(generation_model: _GenerationModel, z: torch.Tensor) -> None:
-    # トレースベースのエクスポートが実際に同じ計算を再現できているか、PyTorch側の出力と突き合わせて確認する
+def _compare_with_pytorch(model: GlyphGenerator, path: Path, simplex_values: torch.Tensor) -> None:
     with torch.no_grad():
-        expected_strokes, expected_existence_prob = generation_model(z)
-
-    session = onnxruntime.InferenceSession(str(ONNX_PATH))
-    actual_strokes, actual_existence_prob = session.run(None, {"z": z.numpy()})
-
-    strokes_diff = np.abs(actual_strokes - expected_strokes.numpy()).max()
-    existence_diff = np.abs(actual_existence_prob - expected_existence_prob.numpy()).max()
-    print(f"Max abs diff: strokes={strokes_diff:.2e} existence={existence_diff:.2e}")
+        torch_ink = model(simplex_values).numpy()
+    onnx_ink = onnxruntime.InferenceSession(str(path)).run(None, {"simplex_values": simplex_values.numpy()})[0]
+    print(f"max abs diff between PyTorch and ONNX Runtime {np.abs(onnx_ink - torch_ink).max():.2e}")
 
 
 def main() -> None:
-    # エクスポートはCPU上で行う(推論性能は問題にならず、デバイス依存の挙動差を避けるため)
-    device = torch.device("cpu")
-    checkpoint = load_checkpoint(device)
-    train_data = load_train_data(checkpoint, device)
-    mu_real, _ = encode(checkpoint, train_data.strokes_standardized, train_data.existence_tensor)
-
-    generation_model = _GenerationModel(
-        checkpoint.model, checkpoint.shape, checkpoint.mean, checkpoint.std, mu_real
-    )
-    generation_model.eval()
-
-    # トレースはグラフの形状・構造を記録するだけで値自体は結果に影響しないため、値は何でもよい
-    dummy_z = torch.zeros(BATCH_SIZE, checkpoint.latent_dim)
-    ONNX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(
-        generation_model,
-        (dummy_z,),
-        str(ONNX_PATH),
-        input_names=["z"],
-        output_names=["strokes", "existence_prob"],
-        opset_version=OPSET_VERSION,
-        # mu_real(学習データ全件のencode結果)を含めても数MB程度で、外部データファイルに
-        # 分ける利点がないため単一ファイルにまとめる
-        external_data=False,
-    )
-    print(f"Saved ONNX model to {ONNX_PATH}")
-
-    verification_z = torch.randn(BATCH_SIZE, checkpoint.latent_dim)
-    _verify_export(generation_model, verification_z)
+    args = _parse_args()
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    model = load_glyph_generator(args.checkpoint)
+    simplex_values = torch.from_numpy(simplex_scattered(model.latent_dim, 1, seed=0))  # 書き出しに使う例の入力(1フレーム分)
+    # 重みも1つのファイルにまとめる(別ファイルに分けると、表示側へ .onnx だけを持っていったときに重みがなくて動かない)
+    torch.onnx.export(model, (simplex_values,), args.output, input_names=["simplex_values"], output_names=["ink"], opset_version=OPSET_VERSION,
+                      external_data=False)
+    _compare_with_pytorch(model, args.output, simplex_values)
+    print(f"Saved {args.output}")
 
 
 if __name__ == "__main__":
