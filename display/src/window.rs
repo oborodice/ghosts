@@ -1,5 +1,5 @@
-// SDL2でOpenGLのウィンドウ(または全画面)を作る。開発機の Mac はデスクトップ向けの OpenGL(4.1 まで)、
-// Raspberry Pi 5 は OpenGL ES 3 に対応するので、作る文脈の種類を切り替える(シェーダーは版の宣言だけが違う。renderer.rs)
+// SDL2でOpenGLのウィンドウ(または全画面)を作る。開発機のMacはデスクトップ向けのOpenGL(4.1まで)、
+// それ以外(ARMのLinuxなど)はOpenGL ES 3を使うので、作る文脈の種類を切り替える(シェーダーは版の宣言だけが違う。renderer.rs)
 use anyhow::{Result, anyhow};
 use sdl2::video::{GLContext, GLProfile, Window};
 use sdl2::{EventPump, Sdl};

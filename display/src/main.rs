@@ -23,11 +23,12 @@ use renderer::GlyphRenderer;
 use walk::{DISPLAY_FPS, LatentWalk};
 use window::GlWindow;
 
-// Raspberry Pi Touch Display 2(5インチ・7インチ、720x1280で縦長が本来の向き)を横向きにした大きさ(Piでは画面を回転させて使う)
+// 展示に使う画面(720x1280で縦長が本来の向き)を横向きにした大きさ(展示では画面を回転させて使う)
 const WINDOW_SIZE: (u32, u32) = (1280, 720);
 const REPORT_EVERY: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
+#[command(version)]
 struct Args {
     // 埋め込んだ生成器の代わりに使う、生成器のONNX(学習側の training/scripts/export_onnx.py で書き出したもの)
     #[arg(long)]
@@ -37,8 +38,8 @@ struct Args {
     seed: u32,
     #[arg(long)]
     fullscreen: bool,
-    // ウィンドウの大きさの倍率。既定は、開発機のMacで実物に近い見かけにする値(Macのウィンドウは約110〜130ppiで、7インチの画面の
-    // 約210ppiより大きく見える)。Piでウィンドウとして実寸で開くときは 1 にする(全画面・書き出しでは使わない)
+    // ウィンドウの大きさの倍率。既定は、開発機のMacで実物に近い見かけにする値(Macのウィンドウは約110〜130ppiで、展示に使う画面の
+    // 約210ppiより大きく見える)。展示に使う画面でウィンドウとして実寸で開くときは1にする(全画面・書き出しでは使わない)
     #[arg(long, default_value_t = 0.6)]
     scale: f64,
     // 指定すると、ウィンドウを出さずに --seconds 秒ぶんを書き出して終わる。拡張子で形式を選ぶ(.mp4 は画面全体を実寸で、.gif は字の正方形を小さく)

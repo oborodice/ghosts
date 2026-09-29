@@ -27,7 +27,7 @@ const INK_COLOR: [f32; 3] = [0.85, 0.92, 1.0]; // 青白い
 const GLOW_SIGMA: f32 = 3.0; // 拡大する前の画像の画素の単位
 const GLOW_COLOR: [f32; 3] = [0.35, 0.6, 1.0];
 const GLOW_STRENGTH: f32 = 0.8;
-// シェーダーは版の宣言を除いて書き、ここで先頭に付ける(開発機の Mac はデスクトップ向けの OpenGL、Pi は OpenGL ES 3)
+// シェーダーは版の宣言を除いて書き、ここで先頭に付ける(開発機のMacはデスクトップ向けのOpenGL、それ以外(ARMのLinuxなど)はOpenGL ES 3)
 const SHADER_HEADER: &str = if DESKTOP_GL {
     "#version 410 core\n"
 } else {
@@ -152,7 +152,7 @@ fn set_uniforms(gl: &glow::Context, program: NativeProgram, values: &[(&str, Uni
 }
 
 fn noise_offset(index: i64) -> [f32; 2] {
-    // ノイズの格子のずらし量(index ごとにばらばらな整数。格子の点の番号が整数のままになるように)。
+    // ノイズの格子のずらし量(indexごとにばらばらな整数。格子の点の番号が整数のままになるように)。
     // 模様の番号から決まる値であればよいので、整数のハッシュ(SplitMix64)で作る
     let mut state = index as u64;
     let mut next = || {
@@ -258,7 +258,7 @@ impl GlyphRenderer {
     }
 
     fn blur_ink(&self, gl: &glow::Context, sigma: f32, padding: i32, targets: &BlurTargets) {
-        // インクの画像を横 → 縦にぼかして targets.textures[1] に描く。周りに padding 画素の余白を持たせる
+        // インクの画像を横 → 縦にぼかして targets.textures[1] に描く。周りにpadding画素の余白を持たせる
         let size = self.image_size + 2 * padding;
         let image_size = self.image_size as f32;
         set_uniforms(
@@ -287,7 +287,7 @@ impl GlyphRenderer {
     }
 
     pub fn draw(&self, gl: &glow::Context, ink: &[f32], seconds: f64) {
-        // ink: 解像度 x 解像度、0=紙〜1=インク。seconds は表示を始めてからの時間(ノイズを時間とともに動かすため)
+        // ink: 解像度 x 解像度、0=紙〜1=インク。secondsは表示を始めてからの時間(ノイズを時間とともに動かすため)
         self.upload_ink(gl, ink);
         self.blur_ink(gl, SOFTEN_SIGMA, 0, &self.soften);
         self.blur_ink(gl, GLOW_SIGMA, self.glow_padding, &self.glow);

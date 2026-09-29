@@ -13,8 +13,8 @@
 
 |対象|ライセンス|全文|
 |---|---|---|
-|ソースコード|GNU General Public License v3.0 のみ( `GPL-3.0-only` )|[LICENSE](LICENSE)|
+|ソースコード|GNU General Public License v3.0のみ( `GPL-3.0-only` )|[LICENSE](LICENSE)|
 |学習した重み(生成器のONNX)|Creative Commons 表示-非営利-継承 4.0 国際(CC BY-NC-SA 4.0)|[creativecommons.org](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.ja)|
 
 - 表示の実行ファイルは重みを埋め込むので、実行ファイルには両方の条件がかかる
-- 第三者のコード・データ・フォントは、それぞれのライセンスに従う(学習側と表示側の README のライセンスの表)
+- 第三者のコード・データ・フォントは、それぞれのライセンスに従う(学習側と表示側のREADMEのライセンスの表)

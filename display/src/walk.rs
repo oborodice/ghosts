@@ -1,6 +1,6 @@
 // 字の変わり方を決める、潜在空間の軌跡(simplex noiseの値)。学習側の training/glyph/walk.py と同じ作り方で、
 // 潜在の次元ごとにノイズ場の別の行を、時間とともにx方向へ進みながらたどる。
-// ノイズは既存のライブラリ(noise クレートの OpenSimplex)を使う。学習側の opensimplex と同じ種類のノイズで、模様の大きさ
+// ノイズは既存のライブラリ(noiseクレートのOpenSimplex)を使う。学習側のopensimplexと同じ種類のノイズで、模様の大きさ
 // (近い位置どうしの相関)は同じだが、値の大きさをそろえる定数が違い、値の幅が約0.62倍になる。生成器のONNXの中の正規分布への
 // 変換の表は学習側の値の分布に合わせてあるので、倍率を掛けて学習側の分布にそろえる
 use noise::{NoiseFn, OpenSimplex};
@@ -27,7 +27,7 @@ impl LatentWalk {
     }
 
     pub fn values(&self, frame: u64) -> Vec<f32> {
-        // frame 番目のフレームの、潜在の次元の数ぶんの値
+        // frame番目のフレームの、潜在の次元の数ぶんの値
         let x = frame as f64 / DISPLAY_FPS * NOISE_SPEED;
         (0..self.latent_dim)
             .map(|dimension| (SCALE_TO_TRAINING * self.noise.get([x, dimension as f64 * DIMENSION_SPACING])) as f32)

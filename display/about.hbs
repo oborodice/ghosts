@@ -1,0 +1,13 @@
+Third-party licenses for the Rust crates built into ghosts-display
+(ONNX Runtime itself is covered by onnxruntime/LICENSE and onnxruntime/ThirdPartyNotices.txt)
+{{#each licenses}}
+
+================================================================================
+{{name}} ({{id}})
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{{text}}}
+{{/each}}

@@ -29,7 +29,7 @@ uniform float glow_strength;
 
 uint lowbias32(uint value) {
     // 整数のハッシュ(入力の1ビットの違いが、出力の全ビットに偏りなく広がる)。
-    // Chris Wellons の hash-prospector(https://github.com/skeeto/hash-prospector、Unlicense)の lowbias32
+    // Chris Wellonsのhash-prospector(https://github.com/skeeto/hash-prospector、Unlicense)のlowbias32
     value ^= value >> 16;
     value *= 0x7feb352du;
     value ^= value >> 15;
@@ -39,15 +39,15 @@ uint lowbias32(uint value) {
 }
 
 float random(vec2 cell) {
-    // 格子の点ごとに、0〜1の一様な乱数。整数のハッシュで作る(sin を使う簡易な乱数は、値が大きいと精度が落ちて斜めの縞が出たため)。
+    // 格子の点ごとに、0〜1の一様な乱数。整数のハッシュで作る(sinを使う簡易な乱数は、値が大きいと精度が落ちて斜めの縞が出たため)。
     // 2つの座標は、縦のハッシュに横を混ぜてから、もう1度ハッシュする
     uvec2 bits = uvec2(ivec2(cell));
-    return float(lowbias32(bits.x ^ lowbias32(bits.y))) / 4294967295.0;  // uint の最大値で割って0〜1にする
+    return float(lowbias32(bits.x ^ lowbias32(bits.y))) / 4294967295.0;  // uintの最大値で割って0〜1にする
 }
 
 float smooth_noise(vec2 position, vec2 offset) {
     // 格子の点の乱数を、なめらかにつないだ揺らぎ(0〜1)。画素ごとにばらばらな乱数より、ざらつきが少ない。
-    // offset は格子をずらす整数(番号を1ずつ足すと、同じ模様が斜めに流れて見えるので、大きくばらばらにずらす)
+    // offsetは格子をずらす整数(番号を1ずつ足すと、同じ模様が斜めに流れて見えるので、大きくばらばらにずらす)
     vec2 cell = floor(position) + offset;
     vec2 blend = smoothstep(0.0, 1.0, fract(position));
     float bottom = mix(random(cell), random(cell + vec2(1.0, 0.0)), blend.x);

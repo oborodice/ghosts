@@ -1,5 +1,5 @@
 // 生成器のONNX(学習側の training/scripts/export_onnx.py で書き出したもの)をONNX Runtime(CPU)で動かし、
-// simplex noiseの値から字のインクの画像を作る。採用した生成器は実行ファイルに埋め込み、Piへは実行ファイル1つで配る
+// simplex noiseの値から字のインクの画像を作る。採用した生成器は実行ファイルに埋め込み、実行ファイル1つで配れるようにする
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -24,7 +24,7 @@ fn tensor_shape(value_type: &ValueType) -> Result<Vec<i64>> {
 
 impl Generator {
     pub fn load(model: Option<&Path>) -> Result<Self> {
-        // model を指定しないときは、埋め込んだ生成器を使う
+        // modelを指定しないときは、埋め込んだ生成器を使う
         let session = match model {
             Some(model) => Session::builder()?
                 .commit_from_file(model)

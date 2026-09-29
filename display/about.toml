@@ -1,0 +1,29 @@
+# cargo-aboutの設定。リリースのアーカイブに添える、実行ファイルに取り込むライブラリのライセンスの文をまとめる(scripts/release.sh が使う)
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# 配るのは64ビットARMのLinux向けの実行ファイルだけなので、その環境で使うライブラリに絞る
+targets = ["aarch64-unknown-linux-gnu"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# この表示自体(ghosts-display)のライセンスは、アーカイブにLICENSEとして別に入れる
+private = { ignore = true }
+
+# sdl2-sysはSDL本体のソースを同梱していて、そのファイルごとのライセンスの文(zlib)を数百個拾ってしまう。
+# SDL本体は実行ファイルに入れず、動かす環境のものを実行時に読むので、SDL全体のライセンスの文1つにまとめる
+[sdl2-sys.clarify]
+license = "MIT AND Zlib"
+
+[[sdl2-sys.clarify.files]]
+path = "SDL/LICENSE.txt"
+license = "Zlib"
+checksum = "9928507f684c1965d07f2b6ef4b4723d5efc2f6b4ab731f743a413c51c319927"
